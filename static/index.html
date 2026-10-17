@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Embroidery Magic</title>
+<style>
+  :root {
+    --bg: #f4f2ee; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6a67; --line: #e2dfd8;
+    --accent: #2f5d50; --accent-ink: #ffffff; --warn: #9a5b00; --warn-bg: #fff4e0;
+    --info-bg: #eef3f8; --info: #2b4c6f; --err: #b3261e; --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 16px 24px 8px; }
+  header h1 { margin: 0; font-size: 19px; letter-spacing: -0.01em; }
+  header span { color: var(--muted); }
+  main { display: grid; grid-template-columns: 320px minmax(340px, 1fr) minmax(360px, 1.1fr);
+         gap: 16px; padding: 8px 24px 32px; align-items: start; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; padding: 8px 16px 24px; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+  h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  h3 { margin: 18px 0 8px; font-size: 13px; }
+  label.field { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 13px; }
+  input[type=number], input[type=text], select {
+    font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; width: 100%; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  button { font: inherit; cursor: pointer; border-radius: 6px; border: 1px solid var(--line); background: #fff;
+           padding: 6px 10px; }
+  button:hover { border-color: #c9c5bb; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
+                   padding: 10px 14px; font-weight: 600; width: 100%; }
+  button.primary:disabled { opacity: .45; cursor: default; }
+  button.small { padding: 3px 8px; font-size: 12px; }
+  a.btn { display: block; text-align: center; text-decoration: none; }
+
+  #drop { border: 2px dashed #cfcac0; border-radius: var(--radius); padding: 22px 12px; text-align: center;
+          color: var(--muted); cursor: pointer; transition: background .15s, border-color .15s; }
+  #drop.over { background: #eef5f2; border-color: var(--accent); color: var(--accent); }
+  #drop img { max-width: 100%; max-height: 180px; display: block; margin: 0 auto 8px; }
+  #drop strong { color: var(--ink); }
+
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .preset { display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 3px; font-size: 12px; }
+  .preset i { width: 18px; height: 18px; border-radius: 4px; border: 1px solid rgba(0,0,0,.2); display: block; }
+  .preset.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  input[type=color] { width: 40px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 6px;
+                      background: none; flex: 0 0 40px; }
+
+  /* thread list */
+  #threads { list-style: none; margin: 0; padding: 0; }
+  #threads li { display: grid; grid-template-columns: 16px 22px 34px 1fr; gap: 6px 8px; align-items: center;
+                padding: 8px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; background: #fff; }
+  #threads li.fabric { background: repeating-linear-gradient(135deg, #faf9f6 0 6px, #f3f1ec 6px 12px); }
+  #threads li.dragging { opacity: .4; }
+  #threads li.drop-before { box-shadow: 0 -3px 0 var(--accent); }
+  .handle { cursor: grab; color: #aaa; user-select: none; font-size: 14px; text-align: center; }
+  .num { font-weight: 700; color: var(--muted); text-align: right; }
+  .meta { min-width: 0; }
+  .meta .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta .sub { color: var(--muted); font-size: 12px; }
+  .meta input.hex { width: 84px; padding: 2px 6px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .controls { grid-column: 3 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 3px 8px; font-size: 12px; }
+  .seg button.on { background: var(--ink); color: #fff; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .controls select { width: auto; font-size: 12px; padding: 2px 4px; }
+  .tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 9px; background: #ece9e2; color: #555; }
+  .tag.auto { background: #e6efe9; color: var(--accent); }
+  .merged { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .merged i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 3px;
+              border: 1px solid rgba(0,0,0,.2); }
+
+  /* preview */
+  .stage { border-radius: 8px; border: 1px solid var(--line); overflow: hidden; display: grid; place-items: center;
+           min-height: 260px; background: #e9e6df; position: relative; }
+  .stage canvas, .stage img { max-width: 100%; max-height: 520px; display: block; }
+  .stage .empty { color: var(--muted); padding: 40px; text-align: center; }
+  .stage .badge { position: absolute; top: 8px; left: 8px; font-size: 11px; background: rgba(0,0,0,.6); color: #fff;
+                  padding: 2px 8px; border-radius: 9px; }
+  .stage .stale { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(244,242,238,.6);
+                  font-weight: 600; color: var(--muted); }
+  .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+  .tabs button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+
+  .warn { border-radius: 8px; padding: 8px 10px; margin: 6px 0; background: var(--warn-bg); color: #4a3200; font-size: 13px; }
+  .warn.info { background: var(--info-bg); color: var(--info); }
+  .warn .fixes { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .warn .fixes i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { font-size: 12px; background: #ece9e2; border-radius: 12px; padding: 2px 4px 2px 10px; display: inline-flex; gap: 4px; align-items: center; }
+  .chip button { border: 0; background: none; padding: 0 4px; }
+
+  table.summary { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.summary td { padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  table.summary td:first-child { width: 28px; color: var(--muted); text-align: right; }
+  table.summary .sw { display: inline-block; width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,.2); vertical-align: -2px; margin-right: 6px; }
+  table.summary tr.unstitched td { color: var(--muted); font-style: italic; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 13px; margin-bottom: 8px; }
+  .kv b { font-weight: 600; }
+  #error { color: var(--err); margin-top: 8px; font-size: 13px; white-space: pre-wrap; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.4);
+             border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  [hidden] { display: none !important; }
+  .checks { list-style: none; padding: 0; margin: 10px 0; font-size: 13px; }
+  .checks li::before { content: "✓ "; color: var(--accent); font-weight: 700; }
+  .checks li.bad::before { content: "✗ "; color: var(--err); }
+  table.trims { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.trims td, table.trims th { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; }
+  table.trims th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  .pill { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%;
+          background: #e61e28; color: #fff; font-size: 11px; font-weight: 700; }
+</style>
+</head>
+<body>
+<header><h1>Embroidery Magic</h1><span>logo → Ink/Stitch SVG → Brother SE400 .pes</span></header>
+<main>
+  <!-- ---------------------------------------------------------------- input -->
+  <section>
+    <h2>1 · Image &amp; options</h2>
+    <div id="drop" tabindex="0">
+      <div id="dropContent"><strong>Drop a logo here</strong><br>PNG, JPG or SVG — or click to choose</div>
+    </div>
+    <input type="file" id="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" hidden>
+
+    <label class="field">Final size (mm, aspect ratio kept)</label>
+    <div class="row">
+      <input type="number" id="w" value="100" min="5" max="100" step="1" aria-label="Width mm">
+      <span style="flex:0">×</span>
+      <input type="number" id="h" value="100" min="5" max="100" step="1" aria-label="Height mm">
+    </div>
+    <div class="hint" id="actualSize">SE400 hoop: 100 × 100 mm max. The design is fitted inside this box and centered in the hoop.</div>
+
+    <label class="field" for="k">Thread colors</label>
+    <select id="k">
+      <option value="auto">Auto</option>
+      <option>2</option><option>3</option><option>4</option><option>5</option>
+      <option>6</option><option>7</option><option>8</option>
+    </select>
+    <div class="hint" id="kHint"></div>
+
+    <label class="field">Fabric color</label>
+    <div class="row">
+      <input type="color" id="fabric" value="#ffffff">
+      <input type="text" id="fabricHex" value="#ffffff" spellcheck="false" style="font-family:ui-monospace,Menlo,monospace">
+    </div>
+    <div class="presets" id="presets"></div>
+    <div id="error"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- palette -->
+  <section>
+    <h2>2 · Threads <span id="orderMode" class="tag" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div id="paletteEmpty" class="hint">Drop an image to detect its colors.</div>
+    <ol id="threads"></ol>
+    <div class="hint" id="paletteHint" hidden>Drag rows to set stitch order. Colors marked <b>Fabric</b> are left unstitched.
+      Within ΔE&nbsp;8 of the fabric they're knocked out automatically.</div>
+    <div id="extras" class="chips" style="margin-top:8px"></div>
+    <div style="margin-top:12px" class="row">
+      <button id="resetOrder" class="small" hidden>Use suggested order</button>
+    </div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- result -->
+  <section>
+    <h2>3 · Result</h2>
+    <div class="tabs" id="tabs">
+      <button data-tab="live" class="on">Live preview</button>
+      <button data-tab="result" disabled>Stitch result</button>
+      <button data-tab="problems" disabled>Problem areas</button>
+      <button data-tab="stitchout" disabled>Stitch-out</button>
+    </div>
+    <div class="stage" id="stage">
+      <div class="empty" id="stageEmpty">Your design will appear here, on the fabric color.</div>
+      <canvas id="live" hidden></canvas>
+      <img id="resultImg" hidden alt="Stitched result preview">
+      <span class="badge" id="stageBadge" hidden></span>
+      <div class="stale" id="stale" hidden>Settings changed — generate again</div>
+    </div>
+    <div style="margin-top:12px"><button class="primary" id="generate" disabled>Generate SVG</button></div>
+    <div id="out" hidden>
+      <h3>Warnings</h3>
+      <div id="warnings"></div>
+      <h3>Summary</h3>
+      <div class="kv" id="summaryKv"></div>
+      <table class="summary" id="threadTable"></table>
+      <div style="margin-top:12px"><a class="btn" id="download" download="design.svg"
+        style="border:1px solid var(--line);border-radius:6px;padding:9px;color:var(--ink)">Download SVG</a></div>
+
+      <h3>Brother SE400</h3>
+      <div class="kv" id="machineKv"></div>
+      <button class="primary" id="exportBtn">Export .pes for SE400</button>
+      <div id="exportOut"></div>
+    </div>
+    <div id="planWarnings"></div>
+  </section>
+</main>
+
+<script>
+const PRESETS = { "White": "#ffffff", "Black": "#141414", "Navy": "#1f2a44", "Gray": "#8a8d91",
+                  "Tan leather": "#b5835a", "Red": "#b3202a" };
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  file: null, session: null, fabric: "#ffffff", prevFabric: null,
+  colors: [],            // {id, hex, fabric(null|bool), merged_into, was_fabric, restored_from}
+  order: null,           // null = suggested order
+  outlines: new Set(), border: false,
+  plan: null, result: null, resultKey: null, tab: "live",
+  labelData: null,       // ImageData of the label map
+};
+
+// ------------------------------------------------------------------ helpers
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : r.statusText);
+  return body;
+}
+const json = (o) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) });
+const normHex = (v) => { v = v.trim().replace(/^#?/, "#").toLowerCase(); if (/^#[0-9a-f]{3}$/.test(v)) v = "#" + [...v.slice(1)].map(c => c + c).join(""); return /^#[0-9a-f]{6}$/.test(v) ? v : null; };
+const hexRgb = (h) => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function showError(e) { $("error").textContent = e ? (e.message || String(e)) : ""; }
+const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+
+function planRequest() {
+  return {
+    session_id: state.session.session_id, fabric_hex: state.fabric, prev_fabric_hex: state.prevFabric,
+    colors: state.colors.map(c => ({ id: c.id, hex: c.hex, fabric: c.fabric, merged_into: c.merged_into,
+                                     was_fabric: c.was_fabric, restored_from: c.restored_from })),
+    order: state.order, outlines: [...state.outlines], border: state.border,
+  };
+}
+
+// ------------------------------------------------------------------ input
+const drop = $("drop");
+drop.addEventListener("click", () => $("file").click());
+drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") $("file").click(); });
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]); });
+$("file").addEventListener("change", (e) => e.target.files[0] && setFile(e.target.files[0]));
+
+function setFile(f) {
+  state.file = f;
+  if (!sizeOk()) return;
+  const url = URL.createObjectURL(f);
+  $("dropContent").innerHTML = `<img src="${url}" alt=""><strong>${esc(f.name)}</strong><br>Drop another to replace`;
+  analyze();
+}
+
+function sizeOk() {
+  const w = +$("w").value, h = +$("h").value;
+  if (w > 100 || h > 100) { showError("The Brother SE400 stitch field is 100 × 100 mm — choose a size up to 100 mm."); return false; }
+  if (!(w >= 5 && h >= 5)) { showError("Size must be at least 5 mm."); return false; }
+  return true;
+}
+const reanalyze = debounce(() => state.file && sizeOk() && analyze(), 500);
+$("w").addEventListener("input", reanalyze);
+$("h").addEventListener("input", reanalyze);
+$("k").addEventListener("change", () => state.file && sizeOk() && analyze());
+
+async function analyze() {
+  showError(null);
+  const fd = new FormData();
+  fd.append("file", state.file);
+  fd.append("width_mm", $("w").value || 100);
+  fd.append("height_mm", $("h").value || 100);
+  fd.append("n_colors", $("k").value);
+  $("generate").disabled = true;
+  $("paletteEmpty").textContent = "Analyzing colors…";
+  $("paletteEmpty").hidden = false;
+  try {
+    const s = await api("/api/analyze", { method: "POST", body: fd });
+    state.session = s;
+    state.colors = s.palette.map(p => ({ id: p.id, hex: p.hex, origHex: p.hex, share: p.share,
+                                         fabric: null, merged_into: s.auto_merge[p.id] ?? null,
+                                         was_fabric: null, restored_from: null }));
+    state.order = null; state.outlines.clear(); state.border = false;
+    state.prevFabric = null; state.result = null;
+    $("actualSize").textContent = `Output: ${s.width_mm} × ${s.height_mm} mm`;
+    $("kHint").textContent = `Suggested: ${s.suggested_k} color${s.suggested_k === 1 ? "" : "s"}` + ($("k").value === "auto" ? "" : ` (using ${s.k})`);
+    await loadLabels(s.label_png);
+    await refreshPlan();
+    $("generate").disabled = false;
+  } catch (e) {
+    showError(e);
+    $("paletteEmpty").textContent = "Drop an image to detect its colors.";
+  }
+}
+
+function loadLabels(url) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = img.width; c.height = img.height;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      state.labelData = ctx.getImageData(0, 0, c.width, c.height);
+      res();
+    };
+    img.onerror = rej;
+    img.src = url;
+  });
+}
+
+// ------------------------------------------------------------------ fabric
+function renderPresets() {
+  $("presets").innerHTML = Object.entries(PRESETS).map(([n, h]) =>
+    `<button class="preset small${h === state.fabric ? " on" : ""}" data-hex="${h}"><i style="background:${h}"></i>${n}</button>`).join("");
+}
+$("presets").addEventListener("click", (e) => { const b = e.target.closest("[data-hex]"); if (b) setFabric(b.dataset.hex); });
+$("fabric").addEventListener("input", debounce((e) => setFabric(e.target.value), 150));
+$("fabricHex").addEventListener("change", (e) => { const h = normHex(e.target.value); h ? setFabric(h) : (e.target.value = state.fabric); });
+
+function setFabric(hex) {
+  if (hex === state.fabric) return;
+  state.prevFabric = state.fabric;     // lets the server spot knockouts that need restoring
+  state.fabric = hex;
+  $("fabric").value = hex; $("fabricHex").value = hex;
+  renderPresets();
+  if (state.session) refreshPlan(); else drawLive();
+}
+
+// ------------------------------------------------------------------ plan (color decisions only)
+async function refreshPlan() {
+  if (!state.session) return;
+  try {
+    const p = await api("/api/plan", json(planRequest()));
+    state.plan = p;
+    state.prevFabric = null;
+    for (const d of p.colors) {
+      const c = state.colors.find(x => x.id === d.id);
+      c.was_fabric = d.fabric;
+      c.restored_from = d.restored_from;
+    }
+    // merged colors follow their target
+    for (const c of state.colors) if (c.merged_into != null) c.was_fabric = null;
+    showError(null);
+  } catch (e) { showError(e); }
+  renderThreads(); renderPlanWarnings(); drawLive(); markStale();
+}
+
+function effective(id) {
+  let c = state.colors.find(x => x.id === id), guard = 0;
+  while (c && c.merged_into != null && guard++ < 10) c = state.colors.find(x => x.id === c.merged_into);
+  return c;
+}
+
+// ------------------------------------------------------------------ thread list
+function renderThreads() {
+  const ul = $("threads");
+  const p = state.plan;
+  $("paletteEmpty").hidden = !!p;
+  $("paletteHint").hidden = !p;
+  if (!p) { ul.innerHTML = ""; return; }
+  $("orderMode").textContent = p.order_source === "user" ? "custom order" : "suggested order";
+  $("resetOrder").hidden = p.order_source !== "user";
+  let n = 0;
+  ul.innerHTML = p.colors.map(d => {
+    const c = state.colors.find(x => x.id === d.id);
+    const merged = state.colors.filter(x => x.merged_into === d.id);
+    const num = d.fabric ? "–" : ++n;
+    const others = p.colors.filter(o => o.id !== d.id);
+    const status = d.fabric
+      ? (d.override == null ? `<span class="tag auto">auto · fabric</span>` : `<span class="tag">fabric</span>`)
+      : (d.override == null ? `<span class="tag auto">auto · stitch</span>` : `<span class="tag">stitch</span>`);
+    return `<li draggable="true" data-id="${d.id}" class="${d.fabric ? "fabric" : ""}">
+      <span class="handle" title="Drag to reorder">⋮⋮</span>
+      <span class="num">${num}</span>
+      <input type="color" value="${d.hex}" data-act="color" title="Change thread color">
+      <div class="meta">
+        <div class="name" title="${esc(d.layer_name)}">${esc(d.layer_name)}</div>
+        <div class="sub"><input class="hex" value="${d.hex}" data-act="hex" spellcheck="false">
+          ${d.area_mm2} mm² · ΔE ${d.delta_e} ${status}</div>
+        ${merged.map(m => `<div class="merged"><i style="background:${m.origHex}"></i>merged ${m.origHex}
+          <button class="small" data-act="unmerge" data-mid="${m.id}">unmerge</button></div>`).join("")}
+      </div>
+      <div class="controls">
+        <div class="seg">
+          <button data-act="stitch" class="${!d.fabric ? "on" : ""}">Stitch</button>
+          <button data-act="fabric" class="${d.fabric ? "on" : ""}">Fabric</button>
+        </div>
+        ${d.override != null ? `<button class="small" data-act="auto">reset to auto</button>` : ""}
+        ${others.length ? `<select data-act="merge"><option value="">Merge into…</option>
+          ${others.map(o => `<option value="${o.id}">${esc(o.layer_name)}</option>`).join("")}</select>` : ""}
+      </div>
+    </li>`;
+  }).join("");
+
+  const ex = [];
+  for (const id of state.outlines) {
+    const d = p.colors.find(x => x.id === id);
+    if (d) ex.push(`<span class="chip">Outline around ${esc(d.name)}<button data-x="outline" data-id="${id}" title="Remove">×</button></span>`);
+  }
+  if (state.border) ex.push(`<span class="chip">Design border<button data-x="border" title="Remove">×</button></span>`);
+  $("extras").innerHTML = ex.join("");
+}
+
+$("extras").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-x]"); if (!b) return;
+  if (b.dataset.x === "outline") state.outlines.delete(+b.dataset.id); else state.border = false;
+  refreshPlan();
+});
+$("resetOrder").addEventListener("click", () => { state.order = null; refreshPlan(); });
+
+const ul = $("threads");
+ul.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-act]"); if (!b) return;
+  const li = b.closest("li"); const c = state.colors.find(x => x.id === +li.dataset.id);
+  const act = b.dataset.act;
+  if (act === "stitch") c.fabric = false;
+  else if (act === "fabric") c.fabric = true;
+  else if (act === "auto") c.fabric = null;
+  else if (act === "unmerge") { const m = state.colors.find(x => x.id === +b.dataset.mid); m.merged_into = null; if (state.order) state.order.push(m.id); }
+  else return;
+  refreshPlan();
+});
+ul.addEventListener("change", (e) => {
+  const el = e.target; const li = el.closest("li"); if (!li) return;
+  const c = state.colors.find(x => x.id === +li.dataset.id);
+  if (el.dataset.act === "merge" && el.value !== "") {
+    const target = +el.value;
+    c.merged_into = target;
+    for (const x of state.colors) if (x.merged_into === c.id) x.merged_into = target;
+    state.outlines.delete(c.id);
+    if (state.order) state.order = state.order.filter(i => i !== c.id);
+    refreshPlan();
+  } else if (el.dataset.act === "hex") {
+    const h = normHex(el.value); if (h) { c.hex = h; refreshPlan(); } else el.value = c.hex;
+  } else if (el.dataset.act === "color") {
+    c.hex = el.value; refreshPlan();
+  }
+});
+ul.addEventListener("input", (e) => {   // live recolor while dragging the color picker
+  if (e.target.dataset.act !== "color") return;
+  const c = state.colors.find(x => x.id === +e.target.closest("li").dataset.id);
+  c.hex = e.target.value; drawLive();
+});
+
+// drag-and-drop stitch order
+let dragId = null;
+ul.addEventListener("dragstart", (e) => {
+  const li = e.target.closest("li"); if (!li) return;
+  dragId = +li.dataset.id; li.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", li.dataset.id);
+});
+ul.addEventListener("dragend", () => { dragId = null; ul.querySelectorAll("li").forEach(l => l.classList.remove("dragging", "drop-before")); });
+ul.addEventListener("dragover", (e) => {
+  if (dragId == null) return;
+  e.preventDefault();
+  ul.querySelectorAll("li").forEach(l => l.classList.remove("drop-before"));
+  const li = e.target.closest("li"); if (li) li.classList.add("drop-before");
+});
+ul.addEventListener("drop", (e) => {
+  if (dragId == null) return;
+  e.preventDefault();
+  const li = e.target.closest("li");
+  const order = state.plan.order.filter(i => i !== dragId);
+  const at = li ? order.indexOf(+li.dataset.id) : order.length;
+  order.splice(at < 0 ? order.length : at, 0, dragId);
+  state.order = order;
+  refreshPlan();
+});
+
+// ------------------------------------------------------------------ warnings (plan + result)
+function warningHtml(w) {
+  const fixes = (w.fixes || []).map(f => {
+    const sw = f.type === "swap" ? `<i style="background:${f.hex}"></i>` : "";
+    return `<button class="small" data-fix='${esc(JSON.stringify(f))}'>${sw}${esc(f.label)}${f.type === "swap" ? " → " + f.hex : ""}</button>`;
+  }).join("");
+  return `<div class="warn ${w.level === "info" ? "info" : ""}">${esc(w.message)}${fixes ? `<div class="fixes">${fixes}</div>` : ""}</div>`;
+}
+function renderPlanWarnings() {
+  // Before generating, show the color decisions' warnings live under the result panel.
+  const ws = (state.session?.warnings || []).concat(state.plan?.warnings || []);
+  $("planWarnings").innerHTML = state.result && !isStale() ? "" :
+    (ws.length ? `<h3>Color checks</h3>` + ws.map(warningHtml).join("") : "");
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-fix]"); if (!b) return;
+  const f = JSON.parse(b.dataset.fix);
+  if (f.type === "swap") { state.colors.find(c => c.id === f.color_id).hex = f.hex; }
+  else if (f.type === "outline") state.outlines.add(f.color_id);
+  else if (f.type === "border") state.border = true;
+  refreshPlan().then(() => { if (state.result) generate(); });
+});
+
+// ------------------------------------------------------------------ live preview
+function drawLive() {
+  const cv = $("live");
+  if (!state.labelData) { cv.hidden = true; return; }
+  const { width, height, data } = state.labelData;
+  cv.width = width; cv.height = height;
+  const ctx = cv.getContext("2d");
+  const out = ctx.createImageData(width, height);
+  const fab = hexRgb(state.fabric);
+  const lut = new Array(256).fill(fab);
+  const decided = new Map((state.plan?.colors || []).map(d => [d.id, d]));
+  for (const c of state.colors) {
+    const t = effective(c.id); const d = t && decided.get(t.id);
+    lut[c.id] = (d && d.fabric) ? fab : hexRgb(t ? t.hex : c.hex);
+  }
+  for (let i = 0; i < data.length; i += 4) {
+    const rgb = lut[data[i]];
+    out.data[i] = rgb[0]; out.data[i + 1] = rgb[1]; out.data[i + 2] = rgb[2]; out.data[i + 3] = 255;
+  }
+  ctx.putImageData(out, 0, 0);
+  showTab(state.tab);
+}
+
+function showTab(tab) {
+  state.tab = tab;
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  const has = !!state.labelData;
+  $("stageEmpty").hidden = has;
+  $("live").hidden = !has || tab !== "live";
+  const img = $("resultImg");
+  img.hidden = tab === "live" || !state.result;
+  if (state.result && tab !== "live") img.src = tab === "problems" ? state.result.preview_marked_png
+    : tab === "stitchout" ? (state.export?.report?.preview_png || state.result.preview_png) : state.result.preview_png;
+  $("stageBadge").hidden = !has;
+  $("stageBadge").textContent = tab === "live" ? "live · on " + (state.plan?.summary.fabric_name || "fabric").toLowerCase()
+    : tab === "problems" ? "red = gaps < 0.6 mm · orange = < 1 mm wide"
+    : tab === "stitchout" ? "from the .pes · 100 mm hoop · red = trim by hand" : "stitched shapes";
+  $("stale").hidden = !(state.result && tab !== "live" && isStale());
+}
+$("tabs").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b && !b.disabled) showTab(b.dataset.tab); });
+
+// ------------------------------------------------------------------ generate
+const requestKey = () => JSON.stringify({ ...planRequest(), prev_fabric_hex: null });
+const isStale = () => state.resultKey !== requestKey();
+function markStale() {
+  $("stale").hidden = !(state.result && state.tab !== "live" && isStale());
+  $("out").hidden = !state.result;
+  renderPlanWarnings();
+}
+
+$("generate").addEventListener("click", generate);
+async function generate() {
+  const btn = $("generate");
+  btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>Generating…`;
+  try {
+    const key = requestKey();
+    const r = await api("/api/generate", json(planRequest()));
+    state.result = r; state.resultKey = key;
+    renderResult();
+    document.querySelectorAll("#tabs button").forEach(b => b.disabled = b.dataset.tab === "stitchout");
+    state.export = null; renderExport();
+    showTab(r.warnings.some(w => w.code === "narrow_gap" || w.code === "narrow_stitch") ? "problems" : "result");
+  } catch (e) { showError(e); }
+  btn.disabled = false; btn.textContent = "Generate SVG";
+  markStale();
+}
+
+function renderResult() {
+  const r = state.result;
+  $("out").hidden = false;
+  $("warnings").innerHTML = r.warnings.length ? r.warnings.map(warningHtml).join("") : `<div class="hint">No warnings.</div>`;
+  const s = r.summary;
+  $("summaryKv").innerHTML = `
+    <span>Size</span><b>${r.width_mm} × ${r.height_mm} mm</b>
+    <span>Fabric</span><b><span class="sw" style="display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid #0003;background:${s.fabric_hex};vertical-align:-1px"></span> ${esc(s.fabric_name)} ${s.fabric_hex}</b>
+    <span>Bobbin</span><b>${esc(s.bobbin_name)}</b>
+    <span>Layers</span><b>${r.layers.map(l => `${l.shapes} shape${l.shapes === 1 ? "" : "s"}`).join(" · ") || "none"}</b>`;
+  $("threadTable").innerHTML = s.threads.map(t => `
+    <tr class="${t.order ? "" : "unstitched"}"><td>${t.order ?? ""}</td>
+    <td><span class="sw" style="background:${t.hex}"></span>${esc(t.name)}</td>
+    <td style="font-family:ui-monospace,Menlo,monospace;font-size:12px">${t.hex}</td>
+    <td>${t.order ? "" : esc(t.status)}</td></tr>`).join("");
+  renderExport();
+  const base = (state.file?.name || "design").replace(/\.[^.]+$/, "");
+  const a = $("download");
+  if (a.href) URL.revokeObjectURL(a.href);
+  a.href = URL.createObjectURL(new Blob([r.svg], { type: "image/svg+xml" }));
+  a.download = `${base}-embroidery.svg`;
+}
+
+// ------------------------------------------------------------------ Brother SE400
+const MACHINE = { inkstitch: null, manual_steps: [] };
+fetch("/api/machine").then(r => r.json()).then(m => Object.assign(MACHINE, m)).catch(() => {});
+
+function renderMachine() {
+  const m = state.result.machine, ex = state.export?.report;
+  const stitches = ex ? ex.stitches : m.estimated_stitches;
+  const mins = ex ? ex.minutes : m.estimated_minutes;
+  const changes = ex ? ex.thread_changes : m.thread_changes;
+  $("machineKv").innerHTML = `
+    <span>Thread changes</span><b>${changes} (${changes + 1} color${changes ? "s" : ""}, single needle)</b>
+    <span>Stitches</span><b>${ex ? "" : "≈ "}${stitches.toLocaleString()}${stitches > 25000 ? " ⚠︎ long run" : ""}</b>
+    <span>Stitch time</span><b>${ex ? "" : "≈ "}${mins} min at 400 spm</b>
+    <span>Hand trims</span><b>${ex ? ex.trims.length : "≈ " + m.estimated_jumps} jump${(ex ? ex.trims.length : m.estimated_jumps) === 1 ? "" : "s"} (SE400 doesn't auto-trim)</b>`;
+}
+
+function renderExport() {
+  const out = $("exportOut"), btn = $("exportBtn");
+  if (!state.result) return;
+  renderMachine();
+  const ex = state.export;
+  btn.hidden = false; btn.disabled = false; btn.textContent = "Export .pes for SE400";
+  if (MACHINE.inkstitch === false) {
+    btn.hidden = true;
+    out.innerHTML = `<div class="warn info">Ink/Stitch wasn't found, so the .pes can't be made here. From the SVG:
+      <ol>${MACHINE.manual_steps.map(x => `<li>${esc(x)}</li>`).join("")}</ol></div>`;
+    return;
+  }
+  if (!ex) { out.innerHTML = ""; return; }
+  if (ex.status === "running") {
+    btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>Ink/Stitch is building stitches…`;
+    out.innerHTML = `<div class="hint">Usually 20–40 seconds.</div>`;
+    return;
+  }
+  if (ex.status === "error") { out.innerHTML = `<div class="warn">${esc(ex.error)}</div>`; return; }
+  const r = ex.report;
+  const stitched = [];
+  for (const t of state.result.summary.threads)
+    if (t.order && (!stitched.length || stitched[stitched.length - 1].hex !== t.hex)) stitched.push(t);
+  const checks = [
+    [r.signature.startsWith("#PES"), `Brother PES file (${esc(r.signature)}, ${(r.size_bytes / 1024).toFixed(0)} KB), read back OK`],
+    [r.extent_mm[0] <= 100 && r.extent_mm[1] <= 100, `Stitches span ${r.extent_mm[0]} × ${r.extent_mm[1]} mm — fits the 100 × 100 mm field (the SE400 centers it in the hoop)`],
+    [r.longest_stitch_mm <= 12.1, `Longest stitch ${r.longest_stitch_mm} mm (limit 12.7 mm)`],
+    [r.color_blocks === state.result.machine.thread_blocks, `${r.color_blocks} color block${r.color_blocks === 1 ? "" : "s"}, each color stitched once`],
+  ];
+  out.innerHTML = `
+    <ul class="checks">${checks.map(([ok, t]) => `<li class="${ok ? "" : "bad"}">${t}</li>`).join("")}</ul>
+    ${r.problems.map(p => `<div class="warn">${esc(p)}</div>`).join("")}
+    ${r.stitches > 25000 ? `<div class="warn">${r.stitches.toLocaleString()} stitches — about ${r.minutes} min on the SE400.</div>` : ""}
+    <h3>Thread changes on the SE400</h3>
+    <table class="summary">${r.threads.map((t, i) => { const mine = stitched[i]; return `<tr><td>${t.order}</td>
+      <td>${mine ? `<span class="sw" style="background:${mine.hex}"></span>${esc(mine.name)}` : ""}</td>
+      <td style="color:var(--muted)">screen: <span class="sw" style="background:${t.hex}"></span>${esc(t.brother_name || t.hex)}</td>
+      <td>${t.stitches.toLocaleString()} st · ${(t.stitches / 400).toFixed(1)} min</td></tr>`; }).join("")}</table>
+    <div class="hint">.pes stores colors as Brother palette entries, so the SE400's screen shows the nearest Brother name
+      at each stop — load your actual thread (left column).</div>
+    <h3>Trim these jumps by hand</h3>
+    ${r.trims.length ? `<table class="trims"><tr><th>#</th><th>Color</th><th>From → to (mm from hoop top-left)</th><th>Length</th></tr>
+      ${r.trims.map(t => `<tr><td><span class="pill">${t.number}</span></td><td>${t.color}. ${esc(stitched[t.color - 1]?.name || t.color_name)}</td>
+        <td>(${t.from_mm.join(", ")}) → (${t.to_mm.join(", ")})</td><td>${t.length_mm} mm</td></tr>`).join("")}</table>
+      <div class="hint">The SE400 doesn't cut jump threads between shapes. Snip each one after its color finishes
+        (they're numbered on the Stitch-out tab).</div>`
+      : `<div class="hint">No jumps within a color — nothing to trim by hand besides the color changes.</div>`}
+    <div style="margin-top:12px"><a class="btn primary" href="/api/export/${ex.job_id}/pes" download>Download .pes</a></div>`;
+}
+
+$("exportBtn").addEventListener("click", async () => {
+  try {
+    const key = requestKey();
+    if (isStale()) await generate();
+    const { job_id } = await api("/api/export", json(planRequest()));
+    state.export = { status: "running", job_id, key };
+    renderExport();
+    while (state.export?.job_id === job_id && state.export.status === "running") {
+      await new Promise(r => setTimeout(r, 2000));
+      const j = await api(`/api/export/${job_id}`);
+      if (state.export?.job_id !== job_id) return;
+      state.export = { ...j, job_id, key };
+    }
+    renderExport();
+    if (state.export.status === "done") {
+      document.querySelector('#tabs [data-tab="stitchout"]').disabled = false;
+      showTab("stitchout");
+    }
+  } catch (e) { state.export = { status: "error", error: e.message }; renderExport(); }
+});
+
+renderPresets();
+</script>
+</body>
+</html>
