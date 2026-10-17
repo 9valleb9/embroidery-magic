@@ -136,6 +136,12 @@
     </div>
     <div class="hint" id="actualSize">SE400 hoop: 100 × 100 mm max. The design is fitted inside this box and centered in the hoop.</div>
 
+    <div id="bgBox" hidden>
+      <label class="field" style="display:flex;gap:8px;align-items:center;font-weight:600">
+        <input type="checkbox" id="removeBg"> Remove background</label>
+      <div class="hint" id="bgHint"></div>
+    </div>
+
     <label class="field" for="k">Thread colors</label>
     <select id="k">
       <option value="auto">Auto</option>
@@ -207,7 +213,7 @@ const PRESETS = { "White": "#ffffff", "Black": "#141414", "Navy": "#1f2a44", "Gr
 const $ = (id) => document.getElementById(id);
 
 const state = {
-  file: null, session: null, fabric: "#ffffff", prevFabric: null,
+  file: null, session: null, fabric: "#ffffff", prevFabric: null, removeBg: "auto",
   colors: [],            // {id, hex, fabric(null|bool), merged_into, was_fabric, restored_from}
   order: null,           // null = suggested order
   outlines: new Set(), border: false,
@@ -249,6 +255,7 @@ $("file").addEventListener("change", (e) => e.target.files[0] && setFile(e.targe
 
 function setFile(f) {
   state.file = f;
+  state.removeBg = "auto";
   if (!sizeOk()) return;
   const url = URL.createObjectURL(f);
   $("dropContent").innerHTML = `<img src="${url}" alt=""><strong>${esc(f.name)}</strong><br>Drop another to replace`;
@@ -273,6 +280,7 @@ async function analyze() {
   fd.append("width_mm", $("w").value || 100);
   fd.append("height_mm", $("h").value || 100);
   fd.append("n_colors", $("k").value);
+  fd.append("remove_bg", state.removeBg);
   $("generate").disabled = true;
   $("paletteEmpty").textContent = "Analyzing colors…";
   $("paletteEmpty").hidden = false;
@@ -280,11 +288,12 @@ async function analyze() {
     const s = await api("/api/analyze", { method: "POST", body: fd });
     state.session = s;
     state.colors = s.palette.map(p => ({ id: p.id, hex: p.hex, origHex: p.hex, share: p.share,
-                                         fabric: null, merged_into: s.auto_merge[p.id] ?? null,
+                                         fabric: null, merged_into: s.auto_merge?.[p.id] ?? null,
                                          was_fabric: null, restored_from: null }));
     state.order = null; state.outlines.clear(); state.border = false;
     state.prevFabric = null; state.result = null;
-    $("actualSize").textContent = `Output: ${s.width_mm} × ${s.height_mm} mm`;
+    $("actualSize").textContent = `Output: ${s.width_mm} × ${s.height_mm} mm, centered in the 100 × 100 mm hoop`;
+    renderBackground(s.background);
     $("kHint").textContent = `Suggested: ${s.suggested_k} color${s.suggested_k === 1 ? "" : "s"}` + ($("k").value === "auto" ? "" : ` (using ${s.k})`);
     await loadLabels(s.label_png);
     await refreshPlan();
@@ -294,6 +303,20 @@ async function analyze() {
     $("paletteEmpty").textContent = "Drop an image to detect its colors.";
   }
 }
+
+function renderBackground(bg) {
+  $("bgBox").hidden = !bg;
+  if (!bg) return;
+  $("removeBg").checked = bg.removed;
+  $("bgHint").innerHTML = `<span class="sw" style="display:inline-block;width:10px;height:10px;border-radius:2px;border:1px solid #0003;background:${bg.hex};vertical-align:-1px"></span>
+    ${bg.hex} fills ${Math.round(bg.share * 100)}% of the image edge. ` + (bg.removed
+      ? "It's removed (never stitched) and the design is cropped to fill your size. Same-colored areas inside the design are kept."
+      : "It's kept as part of the design — e.g. for a patch.");
+}
+$("removeBg").addEventListener("change", (e) => {
+  state.removeBg = e.target.checked ? "on" : "off";
+  if (state.file && sizeOk()) analyze();
+});
 
 function loadLabels(url) {
   return new Promise((res, rej) => {

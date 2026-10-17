@@ -18,7 +18,7 @@ from shapely.geometry import Point, Polygon
 from shapely.ops import unary_union
 
 from . import colors as C
-from .palette import TRANSPARENT, analyze
+from .palette import TRANSPARENT, analyze, edge_connected, frame_label
 from .export import EST_STITCHES_PER_MM2, HOOP_MM, SPEED_SPM, STITCH_WARN
 from .raster import PX_PER_MM, rasterize
 from .svg_out import write_svg
@@ -50,6 +50,7 @@ class Session:
     height_mm: float
     suggested_k: int
     warnings: list[dict]
+    background: dict | None = None             # {hex, share, removed} when an edge background was found
     _geom: dict = field(default_factory=dict)
 
     def geometry(self, mapping: dict[int, int]) -> Geometry:
@@ -73,15 +74,57 @@ def get_session(sid: str) -> Session:
 # ---------------------------------------------------------------- analysis
 
 def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
-                n_colors: int | None) -> Session:
+                n_colors: int | None, remove_bg: str = "auto") -> Session:
+    """remove_bg: "auto"/"on" remove a detected edge background, "off" keeps it."""
     rgb, alpha, w_mm, h_mm = rasterize(data, filename, width_mm, height_mm)
     res = analyze(rgb, alpha, n_colors)
+
+    background = None
+    bg_id, share = frame_label(res.labels)
+    if bg_id is not None and bg_id != TRANSPARENT:
+        background = {"hex": res.hexes[bg_id], "share": round(share, 2), "removed": remove_bg != "off"}
+    if background and background["removed"]:
+        labels = res.labels
+        keep = (labels != TRANSPARENT) & ~edge_connected(labels == bg_id)
+        ys, xs = np.nonzero(keep)
+        if not len(xs):
+            raise ValueError("Removing the background left nothing to stitch.")
+        H, W = labels.shape
+        m = 2   # px of slack so anti-aliased edges aren't clipped
+        x0, y0 = max(0, xs.min() - m), max(0, ys.min() - m)
+        x1, y1 = min(W, xs.max() + 1 + m), min(H, ys.max() + 1 + m)
+        if (x1 - x0) < 0.98 * W or (y1 - y0) < 0.98 * H:
+            # Crop to the subject so it fills the requested size, then re-analyze.
+            rgb, alpha, w_mm, h_mm = rasterize(data, filename, width_mm, height_mm,
+                                               crop=(x0 / W, y0 / H, x1 / W, y1 / H))
+            res = analyze(rgb, alpha, n_colors)
+        _remove_background(res, background["hex"])
+
     s = Session(id=uuid.uuid4().hex, filename=filename, labels=res.labels, hexes=res.hexes,
-                width_mm=w_mm, height_mm=h_mm, suggested_k=res.suggested_k, warnings=res.warnings)
+                width_mm=w_mm, height_mm=h_mm, suggested_k=res.suggested_k, warnings=res.warnings,
+                background=background)
     _SESSIONS[s.id] = s
     while len(_SESSIONS) > _MAX_SESSIONS:
         _SESSIONS.popitem(last=False)
     return s
+
+
+def _remove_background(res, bg_hex: str) -> None:
+    """Edge-connected regions in the background color become empty (never stitched).
+    Same-colored areas enclosed by the design stay a normal thread color."""
+    labels = res.labels
+    for i, hx in enumerate(res.hexes):
+        if C.delta_e(hx, bg_hex) < C.KNOCKOUT_DE:
+            labels[edge_connected(labels == i)] = TRANSPARENT
+    counts = np.bincount(labels.ravel(), minlength=256)
+    keep = [i for i in range(len(res.hexes)) if counts[i]]
+    if not keep:
+        raise ValueError("Removing the background left nothing to stitch.")
+    lut = np.full(256, TRANSPARENT, np.uint8)
+    for new, old in enumerate(keep):
+        lut[old] = new
+    res.labels = lut[labels]
+    res.hexes = [res.hexes[i] for i in keep]
 
 
 def session_payload(s: Session) -> dict:
@@ -97,6 +140,7 @@ def session_payload(s: Session) -> dict:
         "palette": [{"id": i, "hex": hx, "area_mm2": round(counts[i] / px_mm2, 1),
                      "share": round(counts[i] / total, 4)} for i, hx in enumerate(s.hexes)],
         "auto_merge": _auto_merge(s.hexes, counts),
+        "background": s.background,
         "label_png": _label_png(s.labels),
         "warnings": s.warnings,
     }

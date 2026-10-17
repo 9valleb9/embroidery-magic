@@ -58,7 +58,7 @@ def index():
 
 @app.post("/api/analyze")
 async def analyze(file: UploadFile = File(...), width_mm: float = Form(HOOP_MM), height_mm: float = Form(HOOP_MM),
-                  n_colors: str = Form("auto")):
+                  n_colors: str = Form("auto"), remove_bg: str = Form("auto")):
     data = await file.read()
     if not data:
         raise HTTPException(400, "Empty file.")
@@ -71,7 +71,7 @@ async def analyze(file: UploadFile = File(...), width_mm: float = Form(HOOP_MM),
         raise HTTPException(400, "Size must be at least 5 mm.")
     k = None if n_colors in ("", "auto") else int(n_colors)
     try:
-        s = pipeline.new_session(data, file.filename or "upload", width_mm, height_mm, k)
+        s = pipeline.new_session(data, file.filename or "upload", width_mm, height_mm, k, remove_bg)
     except Exception as e:  # unreadable image, bad SVG, fully transparent, ...
         raise HTTPException(422, f"Couldn't read that image: {e}")
     return pipeline.session_payload(s)

@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from app import app
 from embroidery import pipeline
-from tests.fixtures import flat_logo_png, messy_traced_svg
+from tests.fixtures import flat_logo_png, messy_traced_svg, ringed_badge_png
 
 SVG = "{http://www.w3.org/2000/svg}"
 INK = "{http://www.inkscape.org/namespaces/inkscape}"
@@ -18,8 +18,9 @@ def client():
     return TestClient(app)
 
 
-def analyze(client, data, name, w=100, h=100):
-    r = client.post("/api/analyze", files={"file": (name, data)}, data={"width_mm": w, "height_mm": h})
+def analyze(client, data, name, w=100, h=100, remove_bg="auto"):
+    r = client.post("/api/analyze", files={"file": (name, data)},
+                    data={"width_mm": w, "height_mm": h, "remove_bg": remove_bg})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -74,7 +75,8 @@ def test_flat_logo_svg(client):
 def test_messy_trace_is_cleaned(client):
     s = analyze(client, messy_traced_svg(), "trace.svg")
     hexes = [p["hex"] for p in s["palette"]]
-    assert s["k"] == 4
+    # navy, red, gold — the white margin is removed as background
+    assert s["k"] == 3 and s["background"]["removed"]
     assert not any(h.startswith("#ff00") or h == "#0000ff" for h in hexes), "hidden content leaked in"
     r = client.post("/api/generate", json=request(s)).json()
     root, layers = check_svg(r["svg"], 100, 100)
@@ -85,8 +87,8 @@ def test_messy_trace_is_cleaned(client):
 
 def test_aspect_ratio_kept_and_centered(client):
     s = analyze(client, messy_traced_svg(), "trace.svg", w=100, h=50)
-    assert (s["width_mm"], s["height_mm"]) == (50, 50)
-    check_svg(client.post("/api/generate", json=request(s)).json()["svg"], 50, 50)
+    assert s["height_mm"] == 50 and s["width_mm"] <= 50
+    check_svg(client.post("/api/generate", json=request(s)).json()["svg"], s["width_mm"], s["height_mm"])
 
 
 def test_larger_than_hoop_is_blocked(client):
@@ -163,3 +165,21 @@ def test_stitch_params_rules():
 def test_bad_upload(client):
     r = client.post("/api/analyze", files={"file": ("x.png", b"not an image")})
     assert r.status_code == 422
+
+
+def test_background_removed_but_interior_kept_on_navy(client):
+    s = analyze(client, ringed_badge_png(), "badge.png")
+    assert s["background"]["hex"] == "#ffffff" and s["background"]["removed"]
+    assert s["width_mm"] == 100                       # cropped to the badge, fills the size
+    white = next(p for p in s["palette"] if p["hex"] == "#ffffff")
+    r = client.post("/api/generate", json=request(s, fabric="#1f2a44")).json()
+    root, layers = check_svg(r["svg"], 100, 100)
+    labels = [g.get(f"{INK}label") for g in layers]
+    assert any("White" in l for l in labels)          # interior white is stitched on navy...
+    # ...but only the interior: a 42 mm-radius disc minus the 32 mm gold square ≈ 4,517 mm²
+    assert abs(white["area_mm2"] - (3.14159 * 42 ** 2 - 32 ** 2)) < 250
+
+    kept = analyze(client, ringed_badge_png(), "badge.png", remove_bg="off")
+    assert not kept["background"]["removed"] and kept["width_mm"] == 100
+    white_kept = next(p for p in kept["palette"] if p["hex"] == "#ffffff")
+    assert white_kept["area_mm2"] > 5_000              # the margin is part of the design again

@@ -196,3 +196,20 @@ def cleanup(labels: np.ndarray, k: int) -> np.ndarray:
             break
         labels = _fill_unassigned(labels)
     return labels
+
+
+def frame_label(labels: np.ndarray) -> tuple[int | None, float]:
+    """The label covering most of the image's outer edge, if it covers at least half."""
+    frame = np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
+    vals, cnts = np.unique(frame, return_counts=True)
+    top = int(cnts.argmax())
+    share = float(cnts[top]) / len(frame)
+    return (int(vals[top]) if share >= 0.5 else None), share
+
+
+def edge_connected(mask: np.ndarray) -> np.ndarray:
+    """Parts of a boolean mask that touch the image border (flood fill from the edges)."""
+    n, cc = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
+    edge = np.unique(np.concatenate([cc[0], cc[-1], cc[:, 0], cc[:, -1]]))
+    edge = edge[edge != 0]
+    return np.isin(cc, edge) if len(edge) else np.zeros_like(mask, bool)

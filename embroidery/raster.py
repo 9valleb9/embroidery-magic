@@ -74,9 +74,14 @@ def is_svg(data: bytes, filename: str) -> bool:
     return head.startswith(b"<?xml") and b"<svg" in head or head.startswith(b"<svg")
 
 
-def rasterize(data: bytes, filename: str, box_w_mm: float, box_h_mm: float):
+MAX_RENDER_PX = 60_000_000   # cap for the full-image render behind a crop
+
+
+def rasterize(data: bytes, filename: str, box_w_mm: float, box_h_mm: float, crop=None):
     """Render the input to fit inside box_w x box_h mm (aspect kept) at PX_PER_MM.
 
+    crop: optional (x0, y0, x1, y1) as fractions of the image; that region is
+    what gets fitted to the box (used after background removal).
     Returns (rgb uint8 HxWx3, alpha uint8 HxW, width_mm, height_mm).
     Strokes in SVG input are rendered as pixels and so come out of vectorization
     as filled outlines.
@@ -95,16 +100,24 @@ def rasterize(data: bytes, filename: str, box_w_mm: float, box_h_mm: float):
         img = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGBA")
         w0, h0 = img.size
 
-    scale = min(box_w_mm / w0, box_h_mm / h0)
-    W = max(1, round(w0 * scale * PX_PER_MM))
-    H = max(1, round(h0 * scale * PX_PER_MM))
+    fx0, fy0, fx1, fy1 = crop or (0.0, 0.0, 1.0, 1.0)
+    cw, ch = w0 * (fx1 - fx0), h0 * (fy1 - fy0)       # region size in natural px
+    scale = min(box_w_mm / cw, box_h_mm / ch)         # mm per natural px
+    W = max(1, round(cw * scale * PX_PER_MM))
+    H = max(1, round(ch * scale * PX_PER_MM))
 
     if svg:
-        png = cairosvg.svg2png(bytestring=clean, output_width=W, output_height=H)
+        # Render the whole image so the crop region comes out at W x H (capped), then cut it out.
+        fw, fh = W / (fx1 - fx0), H / (fy1 - fy0)
+        shrink = min(1.0, (MAX_RENDER_PX / (fw * fh)) ** 0.5)
+        fw, fh = max(1, round(fw * shrink)), max(1, round(fh * shrink))
+        png = cairosvg.svg2png(bytestring=clean, output_width=fw, output_height=fh)
         img = Image.open(io.BytesIO(png)).convert("RGBA")
-        if img.size != (W, H):
-            img = img.resize((W, H), Image.LANCZOS)
-    else:
+        fw, fh = img.size
+        img = img.crop((round(fx0 * fw), round(fy0 * fh), round(fx1 * fw), round(fy1 * fh)))
+    elif crop:
+        img = img.crop((round(fx0 * w0), round(fy0 * h0), round(fx1 * w0), round(fy1 * h0)))
+    if img.size != (W, H):
         img = img.resize((W, H), Image.LANCZOS)
 
     arr = np.asarray(img)

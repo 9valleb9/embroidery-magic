@@ -62,3 +62,19 @@ def messy_traced_svg(specks: int = 400, seed: int = 1) -> bytes:
         parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{r:.2f}" fill="{rnd.choice(colors)}"/>')
     parts.append("</svg>")
     return "\n".join(parts).encode()
+
+
+def ringed_badge_png(size: int = 600) -> bytes:
+    """Crab-like case: a white margin around a black-ringed badge whose interior is
+    also white, with a gold square inside. The margin is background; the white
+    interior is part of the design."""
+    s = size * 4
+    img = Image.new("RGB", (s, s), "white")
+    d = ImageDraw.Draw(img)
+    d.ellipse([s * 0.25, s * 0.25, s * 0.75, s * 0.75], fill="black")
+    d.ellipse([s * 0.29, s * 0.29, s * 0.71, s * 0.71], fill="white")
+    d.rectangle([s * 0.42, s * 0.42, s * 0.58, s * 0.58], fill="#e0b030")
+    img = img.resize((size, size), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
