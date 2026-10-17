@@ -166,6 +166,10 @@
     <ol id="threads"></ol>
     <div class="hint" id="paletteHint" hidden>Drag rows to set stitch order. Colors marked <b>Fabric</b> are left unstitched.
       Within ΔE&nbsp;8 of the fabric they're knocked out automatically.</div>
+    <label class="hint" id="thinBox" hidden style="display:flex;gap:8px;align-items:flex-start;margin-top:10px;color:var(--ink)">
+      <input type="checkbox" id="thinLines" checked style="margin-top:2px">
+      <span><b>Stitch thin lines as outlines</b> — features under 1 mm wide become a triple running stitch
+        (fills can't hold them). Cleaner lines, but usually a few more jumps to trim.</span></label>
     <div id="extras" class="chips" style="margin-top:8px"></div>
     <div style="margin-top:12px" class="row">
       <button id="resetOrder" class="small" hidden>Use suggested order</button>
@@ -216,7 +220,7 @@ const state = {
   file: null, session: null, fabric: "#ffffff", prevFabric: null, removeBg: "auto",
   colors: [],            // {id, hex, fabric(null|bool), merged_into, was_fabric, restored_from}
   order: null,           // null = suggested order
-  outlines: new Set(), border: false,
+  outlines: new Set(), border: false, thinLines: true,
   plan: null, result: null, resultKey: null, tab: "live",
   labelData: null,       // ImageData of the label map
 };
@@ -240,7 +244,7 @@ function planRequest() {
     session_id: state.session.session_id, fabric_hex: state.fabric, prev_fabric_hex: state.prevFabric,
     colors: state.colors.map(c => ({ id: c.id, hex: c.hex, fabric: c.fabric, merged_into: c.merged_into,
                                      was_fabric: c.was_fabric, restored_from: c.restored_from })),
-    order: state.order, outlines: [...state.outlines], border: state.border,
+    order: state.order, outlines: [...state.outlines], border: state.border, thin_lines: state.thinLines,
   };
 }
 
@@ -383,6 +387,7 @@ function renderThreads() {
   const p = state.plan;
   $("paletteEmpty").hidden = !!p;
   $("paletteHint").hidden = !p;
+  $("thinBox").hidden = !p;
   if (!p) { ul.innerHTML = ""; return; }
   $("orderMode").textContent = p.order_source === "user" ? "custom order" : "suggested order";
   $("resetOrder").hidden = p.order_source !== "user";
@@ -433,6 +438,7 @@ $("extras").addEventListener("click", (e) => {
   refreshPlan();
 });
 $("resetOrder").addEventListener("click", () => { state.order = null; refreshPlan(); });
+$("thinLines").addEventListener("change", (e) => { state.thinLines = e.target.checked; refreshPlan(); });
 
 const ul = $("threads");
 ul.addEventListener("click", (e) => {
@@ -593,7 +599,7 @@ function renderResult() {
     <span>Size</span><b>${r.width_mm} × ${r.height_mm} mm</b>
     <span>Fabric</span><b><span class="sw" style="display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid #0003;background:${s.fabric_hex};vertical-align:-1px"></span> ${esc(s.fabric_name)} ${s.fabric_hex}</b>
     <span>Bobbin</span><b>${esc(s.bobbin_name)}</b>
-    <span>Layers</span><b>${r.layers.map(l => `${l.shapes} shape${l.shapes === 1 ? "" : "s"}`).join(" · ") || "none"}</b>`;
+    <span>Layers</span><b>${r.layers.map(l => `${l.shapes - l.lines} fill${l.shapes - l.lines === 1 ? "" : "s"}${l.lines ? ` + ${l.lines} line${l.lines === 1 ? "" : "s"}` : ""}`).join(" · ") || "none"}</b>`;
   $("threadTable").innerHTML = s.threads.map(t => `
     <tr class="${t.order ? "" : "unstitched"}"><td>${t.order ?? ""}</td>
     <td><span class="sw" style="background:${t.hex}"></span>${esc(t.name)}</td>

@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from app import app
 from embroidery import pipeline
-from tests.fixtures import flat_logo_png, messy_traced_svg, ringed_badge_png
+from tests.fixtures import flat_logo_png, messy_traced_svg, ringed_badge_png, thin_outline_png
 
 SVG = "{http://www.w3.org/2000/svg}"
 INK = "{http://www.inkscape.org/namespaces/inkscape}"
@@ -48,6 +48,10 @@ def check_svg(svg_text, w_mm, h_mm):
     assert abs((min(xs) + max(xs)) / 2 - 50) < 1.5 and abs((min(ys) + max(ys)) / 2 - 50) < 1.5
     assert max(xs) - min(xs) <= w_mm + 0.2 and max(ys) - min(ys) <= h_mm + 0.2
     for p in paths:
+        if p.get(f"{STITCH}stroke_method"):       # outline mode: running-stitch centerline
+            assert p.get(f"{STITCH}stroke_method") == "running_stitch"
+            assert "fill:none" in p.get("style")
+            continue
         method = p.get(f"{STITCH}fill_method")
         assert method in ("auto_fill", "contour_fill"), p.get("id")
         if method == "auto_fill":
@@ -183,3 +187,22 @@ def test_background_removed_but_interior_kept_on_navy(client):
     assert not kept["background"]["removed"] and kept["width_mm"] == 100
     white_kept = next(p for p in kept["palette"] if p["hex"] == "#ffffff")
     assert white_kept["area_mm2"] > 5_000              # the margin is part of the design again
+
+
+def test_thin_outline_becomes_running_stitch(client):
+    s = analyze(client, thin_outline_png(), "outline.png")
+
+    r = client.post("/api/generate", json=request(s)).json()
+    root, layers = check_svg(r["svg"], 100, 100)
+    g = next(g for g in layers if "Black" in g.get(f"{INK}label"))
+    strokes = [p for p in g.iter(f"{SVG}path") if p.get(f"{STITCH}stroke_method")]
+    fills = [p for p in g.iter(f"{SVG}path") if p.get(f"{STITCH}fill_method")]
+    assert 1 <= len(strokes) <= 3                  # the ring, as one (or a few) continuous runs
+    assert strokes[0].get(f"{STITCH}bean_stitch_repeats") == "1"
+    assert len(fills) == 1                         # the 4 mm bar is still a fill
+    assert not any(w["code"] == "narrow_stitch" and "Black" in w["message"] for w in r["warnings"])
+
+    off = client.post("/api/generate", json=request(s, thin_lines=False)).json()
+    root, layers = check_svg(off["svg"], 100, 100)
+    assert not any(p.get(f"{STITCH}stroke_method") for p in root.iter(f"{SVG}path"))
+    assert any(w["code"] == "narrow_stitch" and "Black" in w["message"] for w in off["warnings"])

@@ -131,3 +131,113 @@ def band(polys: list[Polygon], width_mm: float, outer_only: bool = False) -> lis
         ring = base.difference(base.buffer(-width_mm, join_style="mitre"))
         out += [q for q in polygons(ring.buffer(0)) if q.area >= 0.2]
     return out
+
+
+# ---------------------------------------------------------------- outline mode
+# Features narrower than THIN_LINE_MM can't hold a fill. Their centerline is
+# stitched instead as a triple (bean) running stitch in the same color.
+
+THIN_LINE_MM = 1.0
+MIN_LINE_MM = 2.0          # shorter thin bits are corner slivers — they stay in the fill
+LINE_SIMPLIFY_MM = 0.08
+LINE_PARAMS = {"stroke_method": "running_stitch", "running_stitch_length_mm": "2",
+               "bean_stitch_repeats": "1"}
+
+
+def split_thin(mask: np.ndarray) -> tuple[np.ndarray, list]:
+    """Split a color mask into (fill mask, centerlines of its thin line features)."""
+    from shapely.geometry import LineString
+    from skimage.morphology import skeletonize
+
+    m = mask.astype(np.uint8)
+    d = max(3, round(THIN_LINE_MM * PX_PER_MM) | 1)
+    core = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d)))
+    thin = mask & ~core.astype(bool)
+    if not thin.any():
+        return mask, []
+    n, cc = cv2.connectedComponents(thin.astype(np.uint8), connectivity=8)
+    skel = skeletonize(mask)
+    length_px = np.bincount(cc[skel & thin], minlength=n)
+    lines = np.flatnonzero(length_px >= MIN_LINE_MM * PX_PER_MM)
+    lines = lines[lines != 0]
+    if not len(lines):
+        return mask, []
+    line_mask = np.isin(cc, lines)
+    # a couple of px of skeleton past the thin part, so lines meet the fills they touch
+    reach = cv2.dilate(line_mask.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    out = []
+    for chain in _join_chains([c for c in _trace(skel & reach) if len(c) >= 2]):
+        ls = LineString([((x + 0.5) / PX_PER_MM, (y + 0.5) / PX_PER_MM) for y, x in chain])
+        ls = ls.simplify(LINE_SIMPLIFY_MM)
+        if ls.length >= 0.6:
+            out.append(ls)
+    return mask & ~line_mask, out
+
+
+def _join_chains(chains: list[list]) -> list[list]:
+    """Link chains that meet at a junction into long continuous runs, so a line is
+    stitched in one go instead of jumping between its pieces."""
+    from collections import defaultdict
+
+    ends = defaultdict(set)
+    for i, c in enumerate(chains):
+        ends[c[0]].add(i)
+        ends[c[-1]].add(i)
+    used = [False] * len(chains)
+    runs = []
+    for i in sorted(range(len(chains)), key=lambda i: -len(chains[i])):   # longest first
+        if used[i]:
+            continue
+        used[i] = True
+        run = list(chains[i])
+        for _ in range(2):                      # extend forward, then from the other end
+            while True:
+                nxt = next((j for j in ends[run[-1]] if not used[j]), None)
+                if nxt is None:
+                    break
+                used[nxt] = True
+                c = chains[nxt] if chains[nxt][0] == run[-1] else chains[nxt][::-1]
+                run.extend(c[1:])
+            run.reverse()
+        runs.append(run)
+    return runs
+
+
+def _trace(skel: np.ndarray) -> list[list[tuple[int, int]]]:
+    """Skeleton pixels -> chains between endpoints/junctions (closed loops included)."""
+    pts = set(zip(*np.nonzero(skel)))
+
+    def nbrs(p):
+        y, x = p
+        out = [q for q in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)) if q in pts]
+        for dy, dx in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+            q = (y + dy, x + dx)
+            # diagonal only when no orthogonal step already connects the two pixels
+            if q in pts and (y + dy, x) not in pts and (y, x + dx) not in pts:
+                out.append(q)
+        return out
+
+    nb = {p: nbrs(p) for p in pts}
+    nodes = {p for p in pts if len(nb[p]) != 2}
+    seen: set = set()
+
+    def walk(a, b):
+        chain = [a, b]
+        seen.add((a, b)); seen.add((b, a))
+        prev, cur = a, b
+        while cur not in nodes and cur != a:
+            nxt = [q for q in nb[cur] if q != prev and (cur, q) not in seen]
+            if not nxt:
+                break
+            q = nxt[0]
+            seen.add((cur, q)); seen.add((q, cur))
+            chain.append(q)
+            prev, cur = cur, q
+        return chain
+
+    chains = []
+    for start in list(nodes) + list(pts):      # junction/end chains first, then pure loops
+        for q in nb[start]:
+            if (start, q) not in seen:
+                chains.append(walk(start, q))
+    return chains

@@ -42,6 +42,7 @@ class PlanIn(BaseModel):
     order: Optional[list[int]] = None       # None = suggested order
     outlines: list[int] = []
     border: bool = False
+    thin_lines: bool = True                 # stitch < 1 mm features as triple running-stitch outlines
 
 
 def _session(sid: str) -> pipeline.Session:

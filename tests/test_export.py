@@ -5,7 +5,7 @@ import pyembroidery as pe
 import pytest
 
 from embroidery import export, pipeline
-from tests.fixtures import flat_logo_png
+from tests.fixtures import flat_logo_png, thin_outline_png
 
 
 def _pes(pattern: pe.EmbPattern) -> bytes:
@@ -67,3 +67,17 @@ def test_inkstitch_export_is_se400_ready():
     assert r["color_blocks"] == 2 and r["stitches"] > 1000
     # the geometry-based estimate shown before export should be in the right ballpark
     assert 0.6 < g["machine"]["estimated_stitches"] / r["stitches"] < 1.6
+
+
+@pytest.mark.inkstitch
+@pytest.mark.skipif(not export.find_inkstitch(), reason="Ink/Stitch not installed")
+def test_inkstitch_exports_outline_lines():
+    s = pipeline.new_session(thin_outline_png(), "outline.png", 100, 100, None)
+    g = pipeline.generate(s, {"fabric_hex": "#ffffff",
+                              "colors": [{"id": i, "hex": h} for i, h in enumerate(s.hexes)]})
+    assert any(l["lines"] for l in g["layers"])
+    r = export.analyze_pes(export.export_pes(g["svg"]), g["machine"]["thread_blocks"])
+    assert r["ok"], r["problems"]
+    black = next(t for t in r["threads"] if t["hex"] < "#303030")
+    # a ~300 mm ring as a triple run of 2 mm stitches is ~450 stitches; a fill would be far more
+    assert 250 < black["stitches"] < 2500

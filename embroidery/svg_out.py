@@ -28,7 +28,7 @@ def path_d(poly: Polygon) -> str:
 
 
 def write_svg(width_mm: float, height_mm: float, layers: list[dict], meta: dict) -> str:
-    """layers: [{label, hex, shapes: [(Polygon, {param: value})]}] in stitch order.
+    """layers: [{label, hex, shapes: [(Polygon | LineString, {param: value})]}] in stitch order.
     meta: {fabric_hex, fabric_name, bobbin_name, bobbin_hex, threads: [{order, hex, name, status}]}"""
     w, h = _num(width_mm), _num(height_mm)
     ns = " ".join(f'xmlns{":" + k if k else ""}="{v}"' for k, v in NS.items())
@@ -52,11 +52,16 @@ def write_svg(width_mm: float, height_mm: float, layers: list[dict], meta: dict)
     n = 0
     for li, layer in enumerate(layers, 1):
         out.append(f'  <g inkscape:groupmode="layer" inkscape:label={quoteattr(layer["label"])} id="layer{li}">')
-        for poly, params in layer["shapes"]:
+        for geom, params in layer["shapes"]:
             n += 1
             attrs = " ".join(f'inkstitch:{k}={quoteattr(v)}' for k, v in params.items())
-            out.append(f'    <path id="path{n}" style="fill:{layer["hex"]};fill-rule:evenodd;stroke:none" '
-                       f'd="{path_d(poly)}" {attrs}/>')
+            if geom.geom_type == "LineString":   # outline mode: running-stitch centerline
+                d = "M " + " L ".join(f"{_num(x)} {_num(y)}" for x, y in geom.coords)
+                out.append(f'    <path id="path{n}" style="fill:none;stroke:{layer["hex"]};stroke-width:0.3" '
+                           f'd="{d}" {attrs}/>')
+            else:
+                out.append(f'    <path id="path{n}" style="fill:{layer["hex"]};fill-rule:evenodd;stroke:none" '
+                           f'd="{path_d(geom)}" {attrs}/>')
         out.append("  </g>")
     out.append("</svg>")
     return "\n".join(out) + "\n"

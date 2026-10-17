@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 from shapely.affinity import translate
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from . import colors as C
@@ -22,19 +22,21 @@ from .palette import TRANSPARENT, analyze, edge_connected, frame_label
 from .export import EST_STITCHES_PER_MM2, HOOP_MM, SPEED_SPM, STITCH_WARN
 from .raster import PX_PER_MM, rasterize
 from .svg_out import write_svg
-from .vectorize import band, mask_to_polygons, polygons, stitch_params
+from .vectorize import LINE_PARAMS, band, mask_to_polygons, polygons, split_thin, stitch_params
 
 OUTLINE_MM = 1.0
 BORDER_MM = 1.0
 NARROW_STITCH_MM = 1.0
 NARROW_GAP_MM = 0.6
 PREVIEW_MAX_PX = 1000
+LINE_DRAW_MM = 0.7         # how wide a triple running stitch reads, for preview + gap checks
 
 
 @dataclass
 class Geometry:
     labels: np.ndarray                         # merged label map
     shapes: dict[int, list[Polygon]]
+    lines: dict[int, list[LineString]]         # outline mode: thin features as centerlines
     area_mm2: dict[int, float]
     adjacency: dict[int, dict[int, int]]       # id -> neighbor id -> shared edge length (px)
     frame_label: int | None                    # label covering most of the image frame (>= 50%)
@@ -53,10 +55,10 @@ class Session:
     background: dict | None = None             # {hex, share, removed} when an edge background was found
     _geom: dict = field(default_factory=dict)
 
-    def geometry(self, mapping: dict[int, int]) -> Geometry:
-        key = tuple(sorted(mapping.items()))
+    def geometry(self, mapping: dict[int, int], thin_lines: bool = True) -> Geometry:
+        key = (tuple(sorted(mapping.items())), thin_lines)
         if key not in self._geom:
-            self._geom[key] = _build_geometry(self.labels, mapping)
+            self._geom[key] = _build_geometry(self.labels, mapping, thin_lines)
         return self._geom[key]
 
 
@@ -176,14 +178,21 @@ def _label_png(labels: np.ndarray) -> str:
 
 # ---------------------------------------------------------------- geometry
 
-def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int]) -> Geometry:
+def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines: bool) -> Geometry:
     lut = np.arange(256, dtype=np.uint8)
     for src, dst in mapping.items():
         lut[src] = dst
     labels = lut[base_labels]
 
     ids = [int(i) for i in np.unique(labels) if i != TRANSPARENT]
-    shapes = {i: mask_to_polygons(labels == i) for i in ids}
+    shapes, lines = {}, {}
+    for i in ids:
+        mask = labels == i
+        if thin_lines:
+            mask, lines[i] = split_thin(mask)
+        else:
+            lines[i] = []
+        shapes[i] = mask_to_polygons(mask)
     counts = np.bincount(labels.ravel(), minlength=256)
     area = {i: float(counts[i]) / PX_PER_MM ** 2 for i in ids}
 
@@ -201,7 +210,7 @@ def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int]) -> Geometr
     vals, cnts = np.unique(frame, return_counts=True)
     top = int(cnts.argmax())
     frame_label = int(vals[top]) if cnts[top] >= 0.5 * len(frame) else None
-    return Geometry(labels, shapes, area, adjacency, frame_label)
+    return Geometry(labels, shapes, lines, area, adjacency, frame_label)
 
 
 def _resolve_merges(colors: list[dict]) -> dict[int, int]:
@@ -227,7 +236,7 @@ def build_plan(s: Session, req: dict) -> dict:
     prev_fabric = req.get("prev_fabric_hex")
     by_id = {c["id"]: c for c in req["colors"]}
     mapping = _resolve_merges(req["colors"])
-    geom = s.geometry(mapping)
+    geom = s.geometry(mapping, bool(req.get("thin_lines", True)))
     eff_ids = [c["id"] for c in req["colors"] if c["id"] not in mapping and c["id"] in geom.shapes]
     outlines = set(req.get("outlines") or [])
     warnings: list[dict] = []
@@ -396,6 +405,7 @@ def generate(s: Session, req: dict) -> dict:
         if d["fabric"]:
             continue
         shapes = [(p, stitch_params(p, d["light_on_dark"])) for p in geom.shapes[cid]]
+        shapes += [(ln, dict(LINE_PARAMS)) for ln in geom.lines[cid]]
         layers.append({"label": d["layer_name"], "hex": d["hex"], "shapes": shapes, "color_id": cid, "kind": "fill"})
         if cid in outlines:
             ring = band(geom.shapes[cid], OUTLINE_MM)
@@ -405,7 +415,8 @@ def generate(s: Session, req: dict) -> dict:
         fabric_ids = {i for i, d in decided.items() if d["fabric"]} | {TRANSPARENT}
         bg = geom.frame_label
         skip = {bg} if bg is not None and bg in fabric_ids else set()
-        sil = unary_union([p for i, ps in geom.shapes.items() if i not in skip for p in ps])
+        sil = unary_union([p for i, ps in geom.shapes.items() if i not in skip for p in ps]
+                          + [ln.buffer(0.4) for i, ls in geom.lines.items() if i not in skip for ln in ls])
         ring = band(polygons(sil), BORDER_MM, outer_only=True)
         layers.append({"label": f"{bw_name} border", "hex": bw_hex, "kind": "border",
                        "shapes": [(p, {"fill_method": "contour_fill"}) for p in ring]})
@@ -427,7 +438,8 @@ def generate(s: Session, req: dict) -> dict:
     plan["preview_png"] = preview
     plan["preview_marked_png"] = preview_marked
     plan["layers"] = [{"label": l["label"], "hex": l["hex"], "shapes": len(l["shapes"]),
-                       "contour": sum(p.get("fill_method") == "contour_fill" for _, p in l["shapes"])}
+                       "contour": sum(p.get("fill_method") == "contour_fill" for _, p in l["shapes"]),
+                       "lines": sum("stroke_method" in p for _, p in l["shapes"])}
                       for l in layers]
     plan["width_mm"], plan["height_mm"] = s.width_mm, s.height_mm
     plan["elapsed_s"] = round(time.time() - t0, 2)
@@ -435,26 +447,32 @@ def generate(s: Session, req: dict) -> dict:
 
 
 def _order_shapes(layers: list[dict], start: Point) -> None:
-    """Within each color, stitch shapes in nearest-neighbor order (plus a 2-opt pass),
-    starting next to where the previous color finished, to keep jumps short. The
-    SE400 doesn't trim, so every jump is a thread to cut by hand."""
+    """Within each color, visit fills and outline lines in nearest-neighbor order,
+    starting next to where the previous color finished, so stitching flows from a
+    fill into the outline that touches it. The SE400 doesn't trim, so every
+    remaining jump is a thread to cut by hand. Pure-fill colors get a 2-opt pass."""
     cursor = start                        # the machine starts at hoop center
     for layer in layers:
-        items = layer["shapes"]
-        if len(items) > 1:
-            left = list(items)
-            route = []
-            cur = cursor
-            while left:
-                nxt = min(left, key=lambda it: it[0].distance(cur))
-                left.remove(nxt)
-                route.append(nxt)
-                cur = nxt[0]
-            if len(route) <= 40:
-                route = _two_opt(route, cursor)
-            layer["shapes"] = route
-        if layer["shapes"]:
-            cursor = layer["shapes"][-1][0].representative_point()
+        left = list(layer["shapes"])
+        route = []
+        here = cursor                     # geometry we're leaving from
+        while left:
+            nxt = min(left, key=lambda it: it[0].distance(here))
+            left.remove(nxt)
+            g, prm = nxt
+            if g.geom_type == "LineString":   # run lines from whichever end is closer
+                if Point(g.coords[-1]).distance(here) < Point(g.coords[0]).distance(here):
+                    g = LineString(g.coords[::-1])
+                here = Point(g.coords[-1])
+            else:
+                here = g
+            route.append((g, prm))
+        if 1 < len(route) <= 40 and all(g.geom_type != "LineString" for g, _ in route):
+            route = _two_opt(route, cursor)
+        layer["shapes"] = route
+        if route:
+            last = route[-1][0]
+            cursor = Point(last.coords[-1]) if last.geom_type == "LineString" else last.representative_point()
 
 
 def _two_opt(route: list, start) -> list:
@@ -493,8 +511,9 @@ def _machine_summary(layers: list[dict]) -> dict:
                              "message": f"Thread {C.color_name(hx)} ({hx}) is used again later in the order — "
                                         "that's an extra manual thread change. Reorder or change the outline color to avoid it."})
         seen.add(hx)
-    area = sum(p.area for l in layers for p, _ in l["shapes"])
-    est = int(round(area * EST_STITCHES_PER_MM2, -2))
+    area = sum(g.area for l in layers for g, _ in l["shapes"])
+    run = sum(g.length for l in layers for g, _ in l["shapes"] if g.geom_type == "LineString")
+    est = int(round(area * EST_STITCHES_PER_MM2 + run * 3 / 2.0, -2))   # triple run, 2 mm stitches
     jumps = sum(max(0, len(l["shapes"]) - 1) for l in layers)
     if est > STITCH_WARN:
         warnings.append({"level": "warn", "code": "stitch_count",
@@ -532,12 +551,21 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str):
     warnings = []
     px2 = PX_PER_MM ** 2
 
+    line_px = max(1, round(LINE_DRAW_MM * PX_PER_MM))
     for layer in layers:
         m = np.zeros((h, w), np.uint8)
-        for poly, _ in layer["shapes"]:
-            _fill(m, poly)
-        img[m.astype(bool)] = C.hex_to_rgb(layer["hex"])[::-1]
-        covered |= m
+        for g, _ in layer["shapes"]:
+            if g.geom_type != "LineString":
+                _fill(m, g)
+        stroke = np.zeros((h, w), np.uint8)
+        for g, _ in layer["shapes"]:
+            if g.geom_type == "LineString":
+                pts = np.round((np.asarray(g.coords) * PX_PER_MM - 0.5) * 8).astype(np.int32)
+                cv2.polylines(stroke, [pts], False, 1, line_px, cv2.LINE_8, shift=3)
+        bgr = C.hex_to_rgb(layer["hex"])[::-1]
+        img[m.astype(bool)] = bgr
+        img[stroke.astype(bool)] = bgr
+        covered |= m | stroke
         if layer["kind"] == "fill":
             narrow = m.astype(bool) & ~cv2.morphologyEx(m, cv2.MORPH_OPEN, _disk(NARROW_STITCH_MM)).astype(bool)
             n, marked = _components(narrow, 0.3 * px2)

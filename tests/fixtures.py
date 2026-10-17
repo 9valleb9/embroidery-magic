@@ -78,3 +78,17 @@ def ringed_badge_png(size: int = 600) -> bytes:
     buf = io.BytesIO()
     img.save(buf, "PNG")
     return buf.getvalue()
+
+
+def thin_outline_png(size: int = 800) -> bytes:
+    """A gold disc with a ~0.6 mm black outline ring around it (at 100 mm), on transparent."""
+    s = size * 4
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse([s * 0.02, s * 0.02, s * 0.98, s * 0.98], fill="black")
+    d.ellipse([s * 0.026, s * 0.026, s * 0.974, s * 0.974], fill="#e0b030")
+    d.rectangle([s * 0.3, s * 0.48, s * 0.7, s * 0.52], fill="black")      # a 4 mm bar: stays a fill
+    img = img.resize((size, size), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
