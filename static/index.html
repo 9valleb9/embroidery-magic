@@ -86,6 +86,10 @@
                   font-weight: 600; color: var(--muted); }
   .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
   .tabs button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .tabs button.locked { opacity: .45; cursor: help; }
+  .tabs-hint { font-size: 12px; color: var(--muted, #777); min-height: 16px; margin: -4px 0 6px; }
+  @keyframes nudge { 0%,100% { transform: none } 25% { transform: translateX(-3px) } 75% { transform: translateX(3px) } }
+  .nudge { animation: nudge .25s 2; }
 
   .warn { border-radius: 8px; padding: 8px 10px; margin: 6px 0; background: var(--warn-bg); color: #4a3200; font-size: 13px; }
   .warn.info { background: var(--info-bg); color: var(--info); }
@@ -181,10 +185,11 @@
     <h2>3 · Result</h2>
     <div class="tabs" id="tabs">
       <button data-tab="live" class="on">Live preview</button>
-      <button data-tab="result" disabled>Stitch result</button>
-      <button data-tab="problems" disabled>Problem areas</button>
-      <button data-tab="stitchout" disabled>Stitch-out</button>
+      <button data-tab="result" class="locked">Stitch result</button>
+      <button data-tab="problems" class="locked">Problem areas</button>
+      <button data-tab="stitchout" class="locked">Stitch-out</button>
     </div>
+    <div class="tabs-hint" id="tabsHint"></div>
     <div class="stage" id="stage">
       <div class="empty" id="stageEmpty">Your design will appear here, on the fabric color.</div>
       <canvas id="live" hidden></canvas>
@@ -295,7 +300,8 @@ async function analyze() {
                                          fabric: null, merged_into: s.auto_merge?.[p.id] ?? null,
                                          was_fabric: null, restored_from: null }));
     state.order = null; state.outlines.clear(); state.border = false;
-    state.prevFabric = null; state.result = null;
+    state.prevFabric = null; state.result = null; state.export = null;
+    lockTabs([]); if (state.tab !== "live") state.tab = "live";
     $("actualSize").textContent = `Output: ${s.width_mm} × ${s.height_mm} mm, centered in the 100 × 100 mm hoop`;
     renderBackground(s.background);
     $("kHint").textContent = `Suggested: ${s.suggested_k} color${s.suggested_k === 1 ? "" : "s"}` + ($("k").value === "auto" ? "" : ` (using ${s.k})`);
@@ -562,7 +568,26 @@ function showTab(tab) {
     : tab === "stitchout" ? "from the .pes · 100 mm hoop · red = trim by hand" : "stitched shapes";
   $("stale").hidden = !(state.result && tab !== "live" && isStale());
 }
-$("tabs").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b && !b.disabled) showTab(b.dataset.tab); });
+const TAB_NEEDS = { result: "generate", problems: "generate", stitchout: "export" };
+function lockTabs(unlocked) {
+  document.querySelectorAll("#tabs button").forEach(b => {
+    const locked = b.dataset.tab !== "live" && !unlocked.includes(b.dataset.tab);
+    b.classList.toggle("locked", locked);
+    b.title = !locked ? "" : TAB_NEEDS[b.dataset.tab] === "export"
+      ? "Export the .pes first" : "Click Generate SVG first";
+  });
+  $("tabsHint").textContent = "";
+}
+$("tabs").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (!b.classList.contains("locked")) { $("tabsHint").textContent = ""; return showTab(b.dataset.tab); }
+  const target = TAB_NEEDS[b.dataset.tab] === "export" && state.result ? $("exportBtn") : $("generate");
+  $("tabsHint").textContent = !state.labelData ? "Drop an image first."
+    : TAB_NEEDS[b.dataset.tab] === "export" && state.result ? "Click “Export .pes for SE400” below first — this view is drawn from the real .pes."
+    : "Click “Generate SVG” below first.";
+  if (target) { target.classList.remove("nudge"); void target.offsetWidth; target.classList.add("nudge"); }
+});
 
 // ------------------------------------------------------------------ generate
 const requestKey = () => JSON.stringify({ ...planRequest(), prev_fabric_hex: null });
@@ -582,7 +607,7 @@ async function generate() {
     const r = await api("/api/generate", json(planRequest()));
     state.result = r; state.resultKey = key;
     renderResult();
-    document.querySelectorAll("#tabs button").forEach(b => b.disabled = b.dataset.tab === "stitchout");
+    lockTabs(["result", "problems"]);
     state.export = null; renderExport();
     showTab(r.warnings.some(w => w.code === "narrow_gap" || w.code === "narrow_stitch") ? "problems" : "result");
   } catch (e) { showError(e); }
@@ -694,7 +719,7 @@ $("exportBtn").addEventListener("click", async () => {
     }
     renderExport();
     if (state.export.status === "done") {
-      document.querySelector('#tabs [data-tab="stitchout"]').disabled = false;
+      lockTabs(["result", "problems", "stitchout"]);
       showTab("stitchout");
     }
   } catch (e) { state.export = { status: "error", error: e.message }; renderExport(); }
