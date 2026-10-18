@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: sudo apt-get update && sudo apt-get install -y libcairo2
+      - run: pip install -r requirements.txt
+      - run: pytest -q -m "not inkstitch"
+
+  docker:
+    # Builds the same image Codespaces uses and runs the real Ink/Stitch exports inside it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t embroidery-magic .
+      - run: docker run --rm embroidery-magic python -m pytest -q -m inkstitch
+      - name: App starts and answers
+        run: |
+          docker run -d --name app -p 8765:8765 embroidery-magic
+          for i in $(seq 1 30); do curl -sf localhost:8765/api/machine && break; sleep 1; done
+          curl -sf localhost:8765/api/machine | grep -q '"inkstitch":true'
+          docker rm -f app

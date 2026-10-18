@@ -1,0 +1,13 @@
+{
+  "name": "Embroidery Magic",
+  "build": { "dockerfile": "../Dockerfile", "context": ".." },
+  "hostRequirements": { "cpus": 2 },
+  "forwardPorts": [8765],
+  "portsAttributes": {
+    "8765": { "label": "Embroidery Magic", "onAutoForward": "openBrowser" }
+  },
+  "postAttachCommand": "python app.py",
+  "customizations": {
+    "codespaces": { "openFiles": ["README.md"] }
+  }
+}
