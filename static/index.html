@@ -87,6 +87,12 @@
   .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
   .tabs button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
   .tabs button.locked { opacity: .45; cursor: help; }
+  details.stitch { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  details.stitch summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+  .slider { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; margin-top: 10px; font-size: 13px; }
+  .slider input[type=range] { grid-column: 1 / -1; width: 100%; }
+  .slider output { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .slider .hint { grid-column: 1 / -1; margin: 0; }
   .tabs-hint { font-size: 12px; color: var(--muted, #777); min-height: 16px; margin: -4px 0 6px; }
   @keyframes nudge { 0%,100% { transform: none } 25% { transform: translateX(-3px) } 75% { transform: translateX(3px) } }
   .nudge { animation: nudge .25s 2; }
@@ -151,9 +157,9 @@
 
     <label class="field">Final size (mm, aspect ratio kept)</label>
     <div class="row">
-      <input type="number" id="w" value="100" min="5" step="1" aria-label="Width mm">
+      <input type="number" id="w" value="99" min="5" step="1" aria-label="Width mm">
       <span style="flex:0">×</span>
-      <input type="number" id="h" value="100" min="5" step="1" aria-label="Height mm">
+      <input type="number" id="h" value="99" min="5" step="1" aria-label="Height mm">
     </div>
     <div class="hint" id="actualSize">The design is fitted inside this box and centered in the hoop.</div>
 
@@ -191,6 +197,22 @@
       <input type="checkbox" id="thinLines" checked style="margin-top:2px">
       <span><b>Stitch thin lines as outlines</b> — features under 1 mm wide become a triple running stitch
         (fills can't hold them). Cleaner lines, but usually a few more jumps to trim.</span></label>
+    <details class="stitch" id="stitchBox" hidden>
+      <summary>Overlap &amp; pull compensation</summary>
+      <div class="slider"><label for="overlap">Color overlap</label><output id="overlapOut"></output>
+        <input type="range" id="overlap" min="0" max="1" step="0.05">
+        <div class="hint">Each color reaches this far under the colors it touches, and fills fabric gaps narrower
+          than twice this, so neighbors don't leave slivers of fabric between them. Never grows the design's outer edge.</div></div>
+      <div class="slider"><label for="pull">Pull compensation</label><output id="pullOut"></output>
+        <input type="range" id="pull" min="0" max="0.5" step="0.05">
+        <div class="hint">Fill rows are stretched this far past each edge, because stitches pull the fabric in.
+          Raise it on stretchy fabric (knits, fleece); 0.2–0.4 mm is typical. Applies to tatami fills.</div></div>
+      <div class="slider"><label for="sliver">Absorb slivers under</label><output id="sliverOut"></output>
+        <input type="range" id="sliver" min="0.1" max="1.5" step="0.05">
+        <div class="hint">Color bands narrower than this (anti-aliased rims, hairline lines between colors) are merged
+          into the neighboring color. Re-analyzes the image. Too high also removes real thin lines.</div></div>
+      <div style="margin-top:8px"><button class="small" id="stitchReset">Reset to defaults</button></div>
+    </details>
     <div id="extras" class="chips" style="margin-top:8px"></div>
     <div style="margin-top:12px" class="row">
       <button id="resetOrder" class="small" hidden>Use suggested order</button>
@@ -246,7 +268,9 @@ const state = {
   plan: null, result: null, resultKey: null, tab: "live",
   labelData: null,       // ImageData of the label map
   machine: { format: "pes", hoop: "4x4", hoopW: 100, hoopH: 100, speed: 400 },
+  stitch: { overlap: 0.3, pull: 0.2, sliver: 0.35 },
 };
+const STITCH_DEFAULTS = { overlap: 0.3, pull: 0.2, sliver: 0.35 };
 
 // ------------------------------------------------------------------ helpers
 async function api(path, opts) {
@@ -269,7 +293,7 @@ function planRequest() {
                                      was_fabric: c.was_fabric, restored_from: c.restored_from })),
     order: state.order, outlines: [...state.outlines], border: state.border, thin_lines: state.thinLines,
     hoop_w: state.machine.hoopW, hoop_h: state.machine.hoopH, format: state.machine.format,
-    speed_spm: state.machine.speed,
+    speed_spm: state.machine.speed, overlap_mm: state.stitch.overlap, pull_comp_mm: state.stitch.pull,
   };
 }
 
@@ -291,11 +315,12 @@ function setFile(f) {
   analyze();
 }
 
+const EDGE_MM = 0.5;   // kept free at each hoop edge (pull compensation stitches past the design's edge)
 const fits = (w, h, hw, hh) => (w <= hw + .05 && h <= hh + .05) || (w <= hh + .05 && h <= hw + .05);
 function sizeOk() {
   const w = +$("w").value, h = +$("h").value, m = state.machine;
   if (!(m.hoopW >= 10 && m.hoopH >= 10)) { showError("Enter the hoop's stitch field in mm."); return false; }
-  if (!fits(w, h, m.hoopW, m.hoopH)) { showError(`${w} × ${h} mm doesn't fit the ${m.hoopW} × ${m.hoopH} mm hoop — choose a smaller size or a bigger hoop.`); return false; }
+  if (!fits(w, h, m.hoopW - 2 * EDGE_MM, m.hoopH - 2 * EDGE_MM)) { showError(`${w} × ${h} mm doesn't fit the ${m.hoopW} × ${m.hoopH} mm hoop — the largest design is ${m.hoopW - 2 * EDGE_MM} × ${m.hoopH - 2 * EDGE_MM} mm (${EDGE_MM} mm is kept free at each edge for pull compensation).`); return false; }
   if (!(w >= 5 && h >= 5)) { showError("Size must be at least 5 mm."); return false; }
   showError(null);
   return true;
@@ -309,8 +334,9 @@ async function analyze() {
   showError(null);
   const fd = new FormData();
   fd.append("file", state.file);
-  fd.append("width_mm", $("w").value || 100);
-  fd.append("height_mm", $("h").value || 100);
+  fd.append("width_mm", $("w").value || 99);
+  fd.append("height_mm", $("h").value || 99);
+  fd.append("sliver_mm", state.stitch.sliver);
   fd.append("hoop_w", state.machine.hoopW);
   fd.append("hoop_h", state.machine.hoopH);
   fd.append("n_colors", $("k").value);
@@ -419,6 +445,7 @@ function renderThreads() {
   $("paletteEmpty").hidden = !!p;
   $("paletteHint").hidden = !p;
   $("thinBox").hidden = !p;
+  $("stitchBox").hidden = !p;
   if (!p) { ul.innerHTML = ""; return; }
   $("orderMode").textContent = p.order_source === "user" ? "custom order" : "suggested order";
   $("resetOrder").hidden = p.order_source !== "user";
@@ -668,10 +695,32 @@ const MACHINE = { inkstitch: null, manual_steps: [], formats: {}, hoops: {} };
 const fmtLabel = () => "." + state.machine.format;
 const hoopText = (w, h) => `${w} × ${h} mm`;
 
-function saveMachine() { try { localStorage.setItem("machine", JSON.stringify(state.machine)); } catch {} }
+function saveMachine() {
+  try { localStorage.setItem("machine", JSON.stringify(state.machine)); localStorage.setItem("stitch", JSON.stringify(state.stitch)); } catch {}
+}
 function loadMachine() {
   try { const m = JSON.parse(localStorage.getItem("machine") || "null"); if (m && m.format) Object.assign(state.machine, m); } catch {}
+  try { const st = JSON.parse(localStorage.getItem("stitch") || "null"); if (st) Object.assign(state.stitch, st); } catch {}
 }
+
+function renderStitchSliders() {
+  for (const k of ["overlap", "pull", "sliver"]) {
+    $(k).value = state.stitch[k];
+    $(k + "Out").textContent = (+state.stitch[k]).toFixed(2) + " mm";
+  }
+}
+const reanalyzeSliver = debounce(() => state.file && sizeOk() && analyze(), 500);
+for (const k of ["overlap", "pull", "sliver"]) {
+  $(k).addEventListener("input", () => {
+    state.stitch[k] = +$(k).value; saveMachine(); renderStitchSliders();
+    if (k === "sliver") reanalyzeSliver(); else markStale();
+  });
+}
+$("stitchReset").addEventListener("click", () => {
+  const sliverChanged = state.stitch.sliver !== STITCH_DEFAULTS.sliver;
+  Object.assign(state.stitch, STITCH_DEFAULTS); saveMachine(); renderStitchSliders(); markStale();
+  if (sliverChanged) reanalyzeSliver();
+});
 
 function renderMachinePickers() {
   const m = state.machine;
@@ -692,8 +741,9 @@ function setHoop(w, h) {
   m.hoopW = w; m.hoopH = h; saveMachine();
   // new hoop: fill it, turned to match the image (wide logo, landscape box); aspect ratio is kept inside
   const wide = state.session && state.session.width_mm > state.session.height_mm;
-  $("w").value = wide ? Math.max(w, h) : Math.min(w, h);
-  $("h").value = wide ? Math.min(w, h) : Math.max(w, h);
+  const [a, b] = [w - 2 * EDGE_MM, h - 2 * EDGE_MM];
+  $("w").value = wide ? Math.max(a, b) : Math.min(a, b);
+  $("h").value = wide ? Math.min(a, b) : Math.max(a, b);
   renderMachinePickers();
   if (state.file && sizeOk()) analyze(); else sizeOk();
 }
@@ -720,11 +770,12 @@ $("speed").addEventListener("input", debounce(() => {
 }, 400));
 
 loadMachine();
+renderStitchSliders();
 fetch("/api/machine").then(r => r.json()).then(m => {
   Object.assign(MACHINE, m);
   if (!MACHINE.formats[state.machine.format]) state.machine.format = m.default_format;
   renderMachinePickers();
-  $("w").value = state.machine.hoopW; $("h").value = state.machine.hoopH;
+  $("w").value = state.machine.hoopW - 2 * EDGE_MM; $("h").value = state.machine.hoopH - 2 * EDGE_MM;
 }).catch(() => {});
 
 function renderMachine() {

@@ -14,6 +14,9 @@ NS = {
 }
 
 
+INKSTITCH_SVG_VERSION = 4   # Ink/Stitch 3.x
+
+
 def _num(v: float) -> str:
     s = f"{v:.3f}".rstrip("0").rstrip(".")
     return "0" if s in ("", "-0") else s
@@ -46,6 +49,9 @@ def write_svg(width_mm: float, height_mm: float, layers: list[dict], meta: dict)
                    f'status={quoteattr(t["status"])}/>')
     out += [
         "    </em:design>",
+        # Current Ink/Stitch param names. Without this stamp Ink/Stitch treats the file as
+        # legacy: it rewrites params and asks (in a dialog) whether to update it.
+        f"    <inkstitch:inkstitch_svg_version>{INKSTITCH_SVG_VERSION}</inkstitch:inkstitch_svg_version>",
         "  </metadata>",
         '  <sodipodi:namedview id="namedview" inkscape:document-units="mm"/>',
     ]

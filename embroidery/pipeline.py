@@ -18,7 +18,7 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from . import colors as C
-from .palette import TRANSPARENT, analyze, edge_connected, frame_label
+from .palette import MORPH_DISK_MM, TRANSPARENT, analyze, edge_connected, frame_label
 from . import machines as M
 from .export import EST_STITCHES_PER_MM2, STITCH_WARN
 from .raster import PX_PER_MM, rasterize
@@ -31,6 +31,8 @@ NARROW_STITCH_MM = 1.0
 NARROW_GAP_MM = 0.6
 PREVIEW_MAX_PX = 1000
 LINE_DRAW_MM = 0.7         # how wide a triple running stitch reads, for preview + gap checks
+DEFAULT_OVERLAP_MM = 0.3   # each color reaches this far under the colors it touches
+DEFAULT_PULL_COMP_MM = 0.2 # tatami rows stretched this far past each edge
 
 
 @dataclass
@@ -77,10 +79,11 @@ def get_session(sid: str) -> Session:
 # ---------------------------------------------------------------- analysis
 
 def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
-                n_colors: int | None, remove_bg: str = "auto") -> Session:
-    """remove_bg: "auto"/"on" remove a detected edge background, "off" keeps it."""
+                n_colors: int | None, remove_bg: str = "auto", sliver_mm: float = MORPH_DISK_MM) -> Session:
+    """remove_bg: "auto"/"on" remove a detected edge background, "off" keeps it.
+    sliver_mm: color bands narrower than this are absorbed into their neighbors."""
     rgb, alpha, w_mm, h_mm = rasterize(data, filename, width_mm, height_mm)
-    res = analyze(rgb, alpha, n_colors)
+    res = analyze(rgb, alpha, n_colors, sliver_mm)
 
     background = None
     bg_id, share = frame_label(res.labels)
@@ -100,7 +103,7 @@ def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
             # Crop to the subject so it fills the requested size, then re-analyze.
             rgb, alpha, w_mm, h_mm = rasterize(data, filename, width_mm, height_mm,
                                                crop=(x0 / W, y0 / H, x1 / W, y1 / H))
-            res = analyze(rgb, alpha, n_colors)
+            res = analyze(rgb, alpha, n_colors, sliver_mm)
         _remove_background(res, background["hex"])
 
     s = Session(id=uuid.uuid4().hex, filename=filename, labels=res.labels, hexes=res.hexes,
@@ -400,12 +403,18 @@ def generate(s: Session, req: dict) -> dict:
     bw_name, bw_hex = C.contrasting_bw(fabric)
     decided = {d["id"]: d for d in plan["colors"]}
 
+    pull = float(req.get("pull_comp_mm", DEFAULT_PULL_COMP_MM) or 0)
+    overlap = float(req.get("overlap_mm", DEFAULT_OVERLAP_MM) or 0)
+    stitched = [cid for cid in plan["order"] if not decided[cid]["fabric"]]
+    grow = _overlap(geom, stitched, overlap)
+
     layers = []
     for cid in plan["order"]:
         d = decided[cid]
         if d["fabric"]:
             continue
-        shapes = [(p, stitch_params(p, d["light_on_dark"])) for p in geom.shapes[cid]]
+        shapes = [(g, prm) for p in geom.shapes[cid]
+                  for prm in [stitch_params(p, d["light_on_dark"], pull)] for g in grow(p)]
         shapes += [(ln, dict(LINE_PARAMS)) for ln in geom.lines[cid]]
         layers.append({"label": d["layer_name"], "hex": d["hex"], "shapes": shapes, "color_id": cid, "kind": "fill"})
         if cid in outlines:
@@ -434,6 +443,10 @@ def generate(s: Session, req: dict) -> dict:
     meta = {**plan["summary"]}
     svg = write_svg(hoop_w, hoop_h, placed, meta)
     preview, preview_marked, geo_warnings = _render_and_check(s, layers, fabric)
+    if max(s.width_mm - hoop_w, s.height_mm - hoop_h) + 2 * pull > 0:
+        geo_warnings.append({"level": "warn", "code": "hoop_edge",
+                             "message": f"With {pull:g} mm pull compensation the stitches reach past the "
+                                        f"{hoop_w:g} × {hoop_h:g} mm hoop — make the design a little smaller."})
 
     plan["warnings"] = s.warnings + plan["warnings"] + machine.pop("warnings") + geo_warnings
     plan["machine"] = machine
@@ -447,6 +460,21 @@ def generate(s: Session, req: dict) -> dict:
     plan["width_mm"], plan["height_mm"] = s.width_mm, s.height_mm
     plan["elapsed_s"] = round(time.time() - t0, 2)
     return plan
+
+
+def _overlap(geom: Geometry, stitched: list[int], mm: float):
+    """Each fill grows by `mm` into the stitched colors it touches, and into fabric gaps
+    narrower than 2×mm (they'd close up anyway), so neighbors overlap instead of leaving
+    slivers of fabric between them. It never grows outward past the design's edge."""
+    if mm <= 0:
+        return lambda p: [p]
+    union = unary_union([p for cid in stitched for p in geom.shapes[cid]])
+    allowed = union.buffer(mm, join_style="round").buffer(-mm, join_style="round")   # closing
+
+    def grow(p: Polygon) -> list[Polygon]:
+        g = p.buffer(mm, join_style="round").intersection(allowed).buffer(0)
+        return [q for q in polygons(g) if q.area >= 0.2] or [p]
+    return grow
 
 
 def _hoop(req: dict) -> tuple[float, float]:

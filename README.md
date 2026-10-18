@@ -59,6 +59,12 @@ Sample inputs are in `samples/`: the mountain badge above, a flat 3-color logo, 
 
 **Stitch thin lines as outlines** (thread panel, on by default): features under 1 mm wide, such as a logo's outline, can't hold a fill. Their centerline (skeleton) is stitched as a triple (bean) running stitch in the same color: `inkstitch:stroke_method="running_stitch"`, `bean_stitch_repeats="1"`, 2 mm stitches. Line pieces that meet are joined into continuous runs and stitched next to the fills they touch. Short thin bits (corner slivers under 2 mm) stay part of the fill. It usually adds a few hand trims; turn it off to compare.
 
+**Overlap & pull compensation** (thread panel, three sliders, remembered between visits):
+
+- **Color overlap** (default 0.3 mm): each color reaches this far under the colors it touches, and fills fabric gaps narrower than twice this, so neighbors overlap instead of leaving slivers of fabric between them. It never grows the design's outer edge, and it shows up in the previews and the gap check.
+- **Pull compensation** (default 0.2 mm, max 0.5): written as Ink/Stitch's `pull_compensation_mm` on tatami fills. Each row of stitches is stretched this far past the shape's edge, because stitching pulls the fabric in. Raise it on stretchy fabrics (0.2–0.4 mm is typical).
+- **Absorb slivers under** (default 0.35 mm): color bands narrower than this, such as anti-aliased rims around a shape or a hairline between two colors, are merged into the neighboring color during clean-up. Changing it re-analyzes the image. Set it too high and real thin lines disappear too.
+
 Changing the fabric only re-runs the **color decisions**. Shapes, palette edits, size and a custom stitch order are kept. Changing size or color count re-analyzes the image.
 
 ## Machines
@@ -67,7 +73,7 @@ Pick the **file format** for your brand, your **hoop** (4×4, 5×7, 6×10, 8×8 
 
 | Constraint | How the app handles it |
 |---|---|
-| Hoop size | The design must fit the hoop's stitch field, either way round. The SVG canvas is the hoop, turned to match the design, with the design centered on it. |
+| Hoop size | The design must fit the hoop's stitch field, either way round, with 0.5 mm kept free at each edge because pull compensation stitches slightly past the design's edge (so 99 × 99 mm max on a 4×4). The SVG canvas is the hoop, turned to match the design, with the design centered on it. |
 | File format | **Export** runs `inkstitch --extension=output --format=<fmt>` in the background (about 20–60 s). It then reads the file back with pyembroidery and checks the signature (.pes, .dst), that the stitches fit the hoop, that the longest stitch is ≤ 12.1 mm, and that each color is exactly one block. |
 | Single needle | It shows the thread-change count. Colors with ΔE < 5 are merged by default (unmerge them in the thread list), and each color is stitched in one block. A warning appears if an outline or border would bring a thread color back later. |
 | Stitch time | Stitches ÷ your machine's speed (default 400 spm, the Brother SE400). A geometry estimate (about 1.9 stitches/mm²) shows right after Generate; the exact count from the file replaces it after export. |
@@ -84,11 +90,11 @@ Built around the Brother SE400 (4×4 hoop, no jump trimming). Every format is ve
 |---|---|
 | Rasterize | 20 px per mm of final size. For SVG input, `<image>`, `<script>`, `<foreignObject>` and hidden elements (`display:none`, `visibility:hidden`, `opacity:0`) are removed before cairosvg renders. Strokes rasterize as pixels, so they come out as filled outlines. |
 | Palette | k-means in CIE Lab on **flat** pixels only (low local variance, so anti-aliased edges are ignored). Every pixel is then snapped to its nearest palette color. |
-| Clean up | A 9 px majority filter on the label map (the label-safe form of a median blur: a median over label ids can invent a third color where two meet). Then a per-color morphological open and close with a 0.35 mm disk. Specks under 1 mm² are absorbed into their surroundings, so dropping them never leaves a gap. |
+| Clean up | A 9 px majority filter on the label map (the label-safe form of a median blur: a median over label ids can invent a third color where two meet). Then a per-color morphological open and close with a disk the size of the sliver setting (default 0.35 mm). Specks under 1 mm² are absorbed into their surroundings, so dropping them never leaves a gap. |
 | Vectorize | `cv2.findContours(RETR_CCOMP)` keeps holes. It drops parts under 1 mm² and holes under 0.8 mm², simplifies at 0.04 mm and fixes geometry with `buffer(0)`. Each color grows by 1 px so neighbors overlap slightly instead of leaving hairline seams. |
 | Fabric | Fabric-marked colors get no layer; they stay as holes in the neighboring colors. |
-| SVG | `width/height` in mm with a mm `viewBox`, inkscape + inkstitch namespaces, one layer per thread named `1 Dark green`, `2 Light green`, … in stitch order. Every shape is `fill-rule:evenodd; stroke:none`. |
-| Stitches | **Thin shapes or rings** (area ÷ perimeter < 1.2 mm, or one hole covering more than half the outline) get `inkstitch:fill_method="contour_fill"`. **Everything else** gets `auto_fill` (tatami), with `inkstitch:angle` taken from the minimum rotated rectangle's long axis and rounded to 5°. Shapes whose edges are mostly horizontal or vertical get 45° instead of 0°/90°. **Light thread (L\* > 70) on dark fabric (L\* < 35)** also gets `fill_underlay="true"` and `row_spacing_mm="0.25"` on tatami shapes. Everything else is left at Ink/Stitch defaults. |
+| SVG | `width/height` in mm with a mm `viewBox`, inkscape + inkstitch namespaces, stamped `inkstitch_svg_version` 4 (Ink/Stitch 3.x parameter names; without it Ink/Stitch treats the file as legacy, rewrites its parameters and asks whether to update it), one layer per thread named `1 Dark green`, `2 Light green`, … in stitch order. Every shape is `fill-rule:evenodd; stroke:none`. |
+| Stitches | **Thin shapes or rings** (area ÷ perimeter < 1.2 mm, or one hole covering more than half the outline) get `inkstitch:fill_method="contour_fill"`. **Everything else** gets `tatami_fill`, with `inkstitch:angle` taken from the minimum rotated rectangle's long axis and rounded to 5°. Shapes whose edges are mostly horizontal or vertical get 45° instead of 0°/90°. **Light thread (L\* > 70) on dark fabric (L\* < 35)** also gets `fill_underlay="true"` and `row_spacing_mm="0.25"` on tatami shapes. Tatami shapes also get the pull compensation setting. Everything else is left at Ink/Stitch defaults. |
 
 Angles use Ink/Stitch's convention: degrees, counter-clockwise from horizontal as seen on screen.
 

@@ -22,7 +22,7 @@ PHOTO_DISTINCT = 80        # distinct coarse colors that suggest a photo/gradien
 PHOTO_ERR = 6.0            # residual Lab error at 8 colors that suggests a photo/gradient
 
 MODE_KERNEL_PX = 9
-MORPH_DISK_MM = 0.35
+MORPH_DISK_MM = 0.35       # default sliver size: color bands narrower than this are absorbed
 MIN_PART_MM2 = 1.0
 
 
@@ -67,7 +67,8 @@ def _assign(lab_px: np.ndarray, centers: np.ndarray, chunk: int = 1_000_000) -> 
     return out
 
 
-def analyze(rgb: np.ndarray, alpha: np.ndarray, n_colors: int | None = None) -> PaletteResult:
+def analyze(rgb: np.ndarray, alpha: np.ndarray, n_colors: int | None = None,
+            sliver_mm: float = MORPH_DISK_MM) -> PaletteResult:
     opaque = alpha >= 128
     if not opaque.any():
         raise ValueError("The image is fully transparent.")
@@ -131,7 +132,7 @@ def analyze(rgb: np.ndarray, alpha: np.ndarray, n_colors: int | None = None) -> 
         px = flat_rgb[flat_labels == i]
         hexes.append(rgb_to_hex(px.mean(0)) if len(px) else rgb_to_hex(rgb[labels == i].mean(0)))
 
-    labels = cleanup(labels, k)
+    labels = cleanup(labels, k, sliver_mm)
     return PaletteResult(labels=labels, hexes=hexes, suggested_k=suggested, warnings=warns)
 
 
@@ -151,7 +152,7 @@ def _disk(diameter_px: int) -> np.ndarray:
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))
 
 
-def cleanup(labels: np.ndarray, k: int) -> np.ndarray:
+def cleanup(labels: np.ndarray, k: int, sliver_mm: float = MORPH_DISK_MM) -> np.ndarray:
     ids = list(range(k)) + [TRANSPARENT]
 
     # Majority (mode) filter. This is the label-safe form of a 9 px median blur:
@@ -165,8 +166,9 @@ def cleanup(labels: np.ndarray, k: int) -> np.ndarray:
         best[upd] = s[upd]
     labels = out
 
-    # Morphological open then close per color, ~0.35 mm disk.
-    disk = _disk(round(MORPH_DISK_MM * PX_PER_MM))
+    # Morphological open then close per color with a sliver_mm disk: bands of a color
+    # narrower than that (anti-aliasing rims, hairline gaps) go to the neighboring colors.
+    disk = _disk(round(sliver_mm * PX_PER_MM))
     cleaned = {}
     for i in ids:
         m = (labels == i).astype(np.uint8)

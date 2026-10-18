@@ -29,12 +29,19 @@ HOOPS = {
 DEFAULT_HOOP = "4x4"
 MAX_HOOP_MM = 400.0
 DEFAULT_SPEED_SPM = 400   # Brother SE400; most home machines are 400–850
+EDGE_MARGIN_MM = 0.5      # kept free at each hoop edge: pull compensation stitches past the design's edge
+MAX_PULL_COMP_MM = EDGE_MARGIN_MM
 
 
 def fits(w: float, h: float, hoop_w: float, hoop_h: float) -> bool:
     """A design fits if it fits either way round (hoops can be used rotated)."""
     eps = 0.05
     return (w <= hoop_w + eps and h <= hoop_h + eps) or (w <= hoop_h + eps and h <= hoop_w + eps)
+
+
+def max_design(hoop_w: float, hoop_h: float) -> tuple[float, float]:
+    """Largest design for a hoop, leaving the edge margin for pull compensation."""
+    return hoop_w - 2 * EDGE_MARGIN_MM, hoop_h - 2 * EDGE_MARGIN_MM
 
 
 def oriented(w: float, h: float, hoop_w: float, hoop_h: float) -> tuple[float, float]:

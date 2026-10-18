@@ -110,13 +110,15 @@ def is_thin_or_ring(poly: Polygon) -> bool:
     return False
 
 
-def stitch_params(poly: Polygon, light_on_dark: bool = False) -> dict[str, str]:
+def stitch_params(poly: Polygon, light_on_dark: bool = False, pull_comp_mm: float = 0.0) -> dict[str, str]:
     if is_thin_or_ring(poly):
         return {"fill_method": "contour_fill"}
     angle = long_axis_angle(poly)
     if angle in (0, 90) and mostly_axis_aligned(poly):
         angle = 45
-    params = {"fill_method": "auto_fill", "angle": str(angle)}
+    params = {"fill_method": "tatami_fill", "angle": str(angle)}
+    if pull_comp_mm > 0:   # rows are stretched this far past each edge (Ink/Stitch: tatami only)
+        params["pull_compensation_mm"] = f"{pull_comp_mm:g}"
     if light_on_dark:
         params["fill_underlay"] = "true"
         params["row_spacing_mm"] = "0.25"

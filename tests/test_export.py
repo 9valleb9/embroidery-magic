@@ -76,7 +76,7 @@ def test_analyze_jef_and_dst():
 @pytest.mark.inkstitch
 @pytest.mark.skipif(not export.find_inkstitch(), reason="Ink/Stitch not installed")
 def test_inkstitch_export_is_se400_ready():
-    s = pipeline.new_session(flat_logo_png(), "logo.png", 100, 100, None)
+    s = pipeline.new_session(flat_logo_png(), "logo.png", 99, 99, None)
     g = pipeline.generate(s, {"fabric_hex": "#ffffff",
                               "colors": [{"id": i, "hex": h} for i, h in enumerate(s.hexes)]})
     data = export.export_file(g["svg"], "pes")
@@ -91,7 +91,7 @@ def test_inkstitch_export_is_se400_ready():
 @pytest.mark.inkstitch
 @pytest.mark.skipif(not export.find_inkstitch(), reason="Ink/Stitch not installed")
 def test_inkstitch_exports_outline_lines():
-    s = pipeline.new_session(thin_outline_png(), "outline.png", 100, 100, None)
+    s = pipeline.new_session(thin_outline_png(), "outline.png", 99, 99, None)
     g = pipeline.generate(s, {"fabric_hex": "#ffffff",
                               "colors": [{"id": i, "hex": h} for i, h in enumerate(s.hexes)]})
     assert any(l["lines"] for l in g["layers"])

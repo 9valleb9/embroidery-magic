@@ -46,6 +46,8 @@ class PlanIn(BaseModel):
     hoop_h: float = machines.HOOPS[machines.DEFAULT_HOOP]["h"]
     format: str = machines.DEFAULT_FORMAT
     speed_spm: float = machines.DEFAULT_SPEED_SPM
+    pull_comp_mm: float = pipeline.DEFAULT_PULL_COMP_MM   # Ink/Stitch pull compensation (tatami fills)
+    overlap_mm: float = pipeline.DEFAULT_OVERLAP_MM       # how far each color reaches under its neighbors
 
 
 def _session(sid: str) -> pipeline.Session:
@@ -61,23 +63,28 @@ def index():
 
 
 @app.post("/api/analyze")
-async def analyze(file: UploadFile = File(...), width_mm: float = Form(100), height_mm: float = Form(100),
+async def analyze(file: UploadFile = File(...), width_mm: float = Form(99), height_mm: float = Form(99),
                   hoop_w: float = Form(100), hoop_h: float = Form(100),
-                  n_colors: str = Form("auto"), remove_bg: str = Form("auto")):
+                  n_colors: str = Form("auto"), remove_bg: str = Form("auto"),
+                  sliver_mm: float = Form(pipeline.MORPH_DISK_MM)):
     data = await file.read()
     if not data:
         raise HTTPException(400, "Empty file.")
     if len(data) > MAX_UPLOAD:
         raise HTTPException(413, "File is larger than 25 MB.")
     _check_hoop(hoop_w, hoop_h)
-    if not machines.fits(width_mm, height_mm, hoop_w, hoop_h):
+    if not machines.fits(width_mm, height_mm, *machines.max_design(hoop_w, hoop_h)):
+        mw, mh = machines.max_design(hoop_w, hoop_h)
         raise HTTPException(400, f"{width_mm:g} × {height_mm:g} mm doesn't fit the "
-                                 f"{machines.hoop_label(hoop_w, hoop_h)} hoop — choose a smaller size or a bigger hoop.")
+                                 f"{machines.hoop_label(hoop_w, hoop_h)} hoop — the largest design is {mw:g} × {mh:g} mm "
+                                 f"({machines.EDGE_MARGIN_MM:g} mm kept free at each edge for pull compensation).")
     if width_mm < 5 or height_mm < 5:
         raise HTTPException(400, "Size must be at least 5 mm.")
+    if not (0.1 <= sliver_mm <= 2):
+        raise HTTPException(400, "Sliver cleanup must be between 0.1 and 2 mm.")
     k = None if n_colors in ("", "auto") else int(n_colors)
     try:
-        s = pipeline.new_session(data, file.filename or "upload", width_mm, height_mm, k, remove_bg)
+        s = pipeline.new_session(data, file.filename or "upload", width_mm, height_mm, k, remove_bg, sliver_mm)
     except Exception as e:  # unreadable image, bad SVG, fully transparent, ...
         raise HTTPException(422, f"Couldn't read that image: {e}")
     return pipeline.session_payload(s)
@@ -94,6 +101,10 @@ def _check_req(req: PlanIn) -> None:
         raise HTTPException(400, f"Unsupported format: {req.format}")
     if not (50 <= req.speed_spm <= 2000):
         raise HTTPException(400, "Machine speed must be between 50 and 2000 stitches per minute.")
+    if not (0 <= req.pull_comp_mm <= machines.MAX_PULL_COMP_MM):
+        raise HTTPException(400, f"Pull compensation must be between 0 and {machines.MAX_PULL_COMP_MM:g} mm.")
+    if not (0 <= req.overlap_mm <= 2):
+        raise HTTPException(400, "Overlap must be between 0 and 2 mm.")
 
 
 @app.post("/api/plan")
