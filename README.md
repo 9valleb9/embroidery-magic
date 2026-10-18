@@ -1,31 +1,56 @@
 # Embroidery Magic
 
-A local web app that turns a logo (PNG, JPG or SVG) into an **Ink/Stitch-ready embroidery SVG** and a verified **.pes for the Brother SE400**: one Inkscape layer per thread color, clean filled shapes, and per-shape stitch settings. It also makes fabric-aware decisions: what to leave unstitched, what will barely show, and which bobbin to use.
+[![tests](https://github.com/9valleb9/embroidery-magic/actions/workflows/test.yml/badge.svg)](https://github.com/9valleb9/embroidery-magic/actions/workflows/test.yml)
 
-## Setup (macOS)
+**Turn a logo into a machine embroidery file — free, open source, runs on your computer.**
+
+Drop in a PNG, JPG or SVG logo, pick your machine, hoop and fabric, and get a stitch file you can put on a USB stick: **.pes** (Brother, Baby Lock), **.jef** (Janome, Elna), **.vp3** (Husqvarna Viking, Pfaff), **.exp** (Bernina), **.xxx** (Singer) or **.dst**. Every file is read back and checked before you download it.
+
+![A flat logo, its stitch plan, and the stitch-out preview read back from the exported .pes](docs/hero.png)
+
+<!-- TODO: add a photo of a real stitch-out (docs/stitched.jpg) -->
+
+Made for home single-needle machines, where the auto-digitizers get the small stuff wrong:
+
+- **Fabric-aware.** Colors that match the fabric aren't stitched. Low-contrast threads get flagged, with a one-click swap or outline. White-on-dark gets underlay so it doesn't sink in. The bobbin color is suggested.
+- **Fewest thread changes.** Near-identical colors are merged, every color is stitched in one go, and you get the change list with the name your machine's screen will show.
+- **A trim map.** Most home machines don't cut the jumps between shapes. You get every jump you'll snip by hand, numbered on a full-hoop stitch-out preview.
+- **Problem areas before you stitch.** Gaps that will close up are marked red, slivers too thin to fill are marked orange, and thin outlines become clean triple running stitches.
+- **Background removal.** A solid background behind the logo is dropped, and the design is cropped to fill your size.
+
+## Try it
+
+**In your browser, no install:** [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/9valleb9/embroidery-magic?quickstart=1)
+
+This uses your GitHub account's free Codespaces hours. The first start builds for a few minutes, then the app opens in a new tab.
+
+**With Docker** (includes Ink/Stitch, so machine-file export just works):
+
+```bash
+docker run --rm -p 8765:8765 $(docker build -q https://github.com/9valleb9/embroidery-magic.git)
+```
+
+Then open <http://localhost:8765>.
+
+**With Python** (macOS shown):
 
 ```bash
 brew install cairo            # needed by cairosvg for SVG input
-python3 -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/9valleb9/embroidery-magic.git && cd embroidery-magic
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+python app.py                 # opens http://127.0.0.1:8765
 ```
 
-For direct .pes export, install [Inkscape](https://inkscape.org) and the [Ink/Stitch](https://inkstitch.org) extension. The app finds Ink/Stitch in the standard macOS extension folder; set `INKSTITCH_BIN=/path/to/inkstitch` to point it somewhere else. Without Ink/Stitch you still get the SVG, plus steps for exporting the .pes by hand.
+To make machine files directly, also install [Inkscape](https://inkscape.org) and the [Ink/Stitch](https://inkstitch.org) extension. The app finds Ink/Stitch in the standard extension folders; set `INKSTITCH_BIN=/path/to/inkstitch` to point it somewhere else. Without it you still get the Ink/Stitch SVG, plus steps for exporting by hand. `PORT=9000` changes the port and `NO_BROWSER=1` skips opening the browser.
 
-## Run
-
-```bash
-python app.py
-```
-
-This opens <http://127.0.0.1:8765>. Set `PORT=9000` to use a different port, or `NO_BROWSER=1` to skip opening the browser.
-
-Try it with the files in `samples/`: a flat 3-color logo and a messy auto-traced SVG with 400 specks, a hidden layer, an embedded bitmap and a stroke-only shape.
+Sample inputs are in `samples/`: the mountain badge above, a flat 3-color logo, and a messy auto-traced SVG with 400 specks, a hidden layer, an embedded bitmap and a stroke-only shape.
 
 ## Using it
 
-1. **Drop an image.** Set the final size (the design is fitted inside the W×H box with its aspect ratio kept) and the number of thread colors. *Auto* suggests the fewest colors that cover every flat area.
+![The app: machine and hoop on the left, thread list in the middle, stitch-out preview read back from the .pes on the right](docs/screenshot.jpg)
+
+1. **Pick your machine and drop an image.** Set the format, hoop and final size (the design is fitted inside the W×H box with its aspect ratio kept) and the number of thread colors. *Auto* suggests the fewest colors that cover every flat area.
 2. **Pick the fabric.** Use a preset (White, Black, Navy, Gray, Tan leather, Red) or the color picker. The live preview always renders on the fabric.
 3. **Edit the threads.** You can change a color's hex, **Merge into…** another color, toggle **Stitch / Fabric**, and drag rows to set the stitch order. Colors within ΔE2000 < 8 of the fabric are knocked out automatically, and *reset to auto* undoes a manual override.
 4. **Generate.** You get a stitched preview, a *Problem areas* view (red = fabric gaps < 0.6 mm, orange = stitched areas < 1 mm wide), warnings with one-click fixes, a summary (fabric, bobbin, thread list) and the SVG download.
@@ -36,18 +61,22 @@ Try it with the files in `samples/`: a flat 3-color logo and a messy auto-traced
 
 Changing the fabric only re-runs the **color decisions**. Shapes, palette edits, size and a custom stitch order are kept. Changing size or color count re-analyzes the image.
 
-## Brother SE400
+## Machines
+
+Pick the **file format** for your brand, your **hoop** (4×4, 5×7, 6×10, 8×8 or a custom size) and your machine's **speed** (for the time estimate). These are remembered between visits.
 
 | Constraint | How the app handles it |
 |---|---|
-| 100×100 mm stitch field | The default size is 100×100 mm, and anything larger is blocked in the UI and the API. The SVG canvas is the hoop (100×100 mm) with the design centered on (50, 50). |
-| .pes format | **Export .pes for SE400** runs `inkstitch --extension=output --format=pes` in the background (about 20–60 s; Ink/Stitch is an x86 build running under Rosetta). It then reads the file back with pyembroidery and checks the `#PES` signature, that the stitches fit 100×100 mm, that the longest stitch is ≤ 12.1 mm (Brother limit 12.7), and that each color appears as exactly one block. |
+| Hoop size | The design must fit the hoop's stitch field, either way round. The SVG canvas is the hoop, turned to match the design, with the design centered on it. |
+| File format | **Export** runs `inkstitch --extension=output --format=<fmt>` in the background (about 20–60 s). It then reads the file back with pyembroidery and checks the signature (.pes, .dst), that the stitches fit the hoop, that the longest stitch is ≤ 12.1 mm, and that each color is exactly one block. |
 | Single needle | It shows the thread-change count. Colors with ΔE < 5 are merged by default (unmerge them in the thread list), and each color is stitched in one block. A warning appears if an outline or border would bring a thread color back later. |
-| 400 stitches/min | Stitch time = stitches ÷ 400. A geometry estimate (about 1.9 stitches/mm²) shows right after Generate; the exact count from the .pes replaces it after export. |
-| No auto-trim | Shapes within a color are ordered nearest-neighbor (plus a 2-opt pass), starting where the previous color ended. Every remaining jump inside a color is listed as a **hand trim** with its position and length, and numbered in red on the **Stitch-out** tab. |
+| Stitch time | Stitches ÷ your machine's speed (default 400 spm, the Brother SE400). A geometry estimate (about 1.9 stitches/mm²) shows right after Generate; the exact count from the file replaces it after export. |
+| Jump trims | Shapes within a color are ordered nearest-neighbor (plus a 2-opt pass), starting where the previous color ended. Every remaining jump inside a color is listed with its position and length, and numbered in red on the **Stitch-out** tab. |
 | Long runs | A warning appears above about 25,000 stitches. |
 
-A .pes stores colors as entries in Brother's thread palette. At each color stop the SE400 shows the *nearest Brother name* (navy may read "Dark Gray"); the app lists your actual thread next to it.
+.pes and .jef store colors as entries in Brother's or Janome's thread palette, so the machine's screen shows the *nearest palette name* at each color stop (navy may read "Dark Gray"). The app lists your actual thread next to it. .dst stores no colors at all; the machine just stops, and you load threads in the listed order.
+
+Built around the Brother SE400 (4×4 hoop, no jump trimming). Every format is verified by reading the exported file back, not by stitching it on each brand's machine. If you stitch one out, please open an issue with how it went (photos welcome).
 
 ## Pipeline
 
@@ -87,7 +116,7 @@ The fabric color, bobbin and thread list (fabric colors marked *not stitched —
 ## Tests
 
 ```bash
-pytest                      # includes a real Ink/Stitch export when installed (~20–60 s)
+pytest                      # includes real Ink/Stitch exports when installed (a few minutes)
 pytest -m "not inkstitch"   # fast run
 ```
 
@@ -103,8 +132,10 @@ embroidery/vectorize.py contours -> polygons, stitch settings, outline bands
 embroidery/colors.py    Lab / ΔE2000, thread names, bobbin, contrast swaps
 embroidery/pipeline.py  sessions, fabric decisions, stitch order, generation, preview + gap checks
 embroidery/svg_out.py   Ink/Stitch SVG writer
-embroidery/export.py    SE400: Ink/Stitch .pes export, pyembroidery verification, hand-trim list
+embroidery/machines.py  file formats by brand, hoop sizes, fit + orientation
+embroidery/export.py    Ink/Stitch machine-file export, pyembroidery verification, jump-trim list
 static/index.html       single-page UI (no build step)
+Dockerfile              app + Ink/Stitch in one image (also used by Codespaces)
 tests/                  pytest + synthetic fixtures
 samples/                example inputs
 ```
