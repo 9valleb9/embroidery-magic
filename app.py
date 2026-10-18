@@ -14,11 +14,10 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from embroidery import export, pipeline
-from embroidery.export import HOOP_MM
+from embroidery import export, machines, pipeline
 
 HERE = Path(__file__).parent
-HOST = "127.0.0.1"
+HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8765"))
 MAX_UPLOAD = 25 * 1024 * 1024
 
@@ -43,6 +42,10 @@ class PlanIn(BaseModel):
     outlines: list[int] = []
     border: bool = False
     thin_lines: bool = True                 # stitch < 1 mm features as triple running-stitch outlines
+    hoop_w: float = machines.HOOPS[machines.DEFAULT_HOOP]["w"]
+    hoop_h: float = machines.HOOPS[machines.DEFAULT_HOOP]["h"]
+    format: str = machines.DEFAULT_FORMAT
+    speed_spm: float = machines.DEFAULT_SPEED_SPM
 
 
 def _session(sid: str) -> pipeline.Session:
@@ -58,16 +61,18 @@ def index():
 
 
 @app.post("/api/analyze")
-async def analyze(file: UploadFile = File(...), width_mm: float = Form(HOOP_MM), height_mm: float = Form(HOOP_MM),
+async def analyze(file: UploadFile = File(...), width_mm: float = Form(100), height_mm: float = Form(100),
+                  hoop_w: float = Form(100), hoop_h: float = Form(100),
                   n_colors: str = Form("auto"), remove_bg: str = Form("auto")):
     data = await file.read()
     if not data:
         raise HTTPException(400, "Empty file.")
     if len(data) > MAX_UPLOAD:
         raise HTTPException(413, "File is larger than 25 MB.")
-    if width_mm > HOOP_MM or height_mm > HOOP_MM:
-        raise HTTPException(400, f"The Brother SE400 stitch field is {HOOP_MM:g}×{HOOP_MM:g} mm — "
-                                 "choose a size up to 100 mm.")
+    _check_hoop(hoop_w, hoop_h)
+    if not machines.fits(width_mm, height_mm, hoop_w, hoop_h):
+        raise HTTPException(400, f"{width_mm:g} × {height_mm:g} mm doesn't fit the "
+                                 f"{machines.hoop_label(hoop_w, hoop_h)} hoop — choose a smaller size or a bigger hoop.")
     if width_mm < 5 or height_mm < 5:
         raise HTTPException(400, "Size must be at least 5 mm.")
     k = None if n_colors in ("", "auto") else int(n_colors)
@@ -76,6 +81,19 @@ async def analyze(file: UploadFile = File(...), width_mm: float = Form(HOOP_MM),
     except Exception as e:  # unreadable image, bad SVG, fully transparent, ...
         raise HTTPException(422, f"Couldn't read that image: {e}")
     return pipeline.session_payload(s)
+
+
+def _check_hoop(w: float, h: float) -> None:
+    if not (10 <= w <= machines.MAX_HOOP_MM and 10 <= h <= machines.MAX_HOOP_MM):
+        raise HTTPException(400, f"Hoop size must be between 10 and {machines.MAX_HOOP_MM:g} mm.")
+
+
+def _check_req(req: PlanIn) -> None:
+    _check_hoop(req.hoop_w, req.hoop_h)
+    if req.format.lower() not in machines.FORMATS:
+        raise HTTPException(400, f"Unsupported format: {req.format}")
+    if not (50 <= req.speed_spm <= 2000):
+        raise HTTPException(400, "Machine speed must be between 50 and 2000 stitches per minute.")
 
 
 @app.post("/api/plan")
@@ -87,25 +105,35 @@ def plan(req: PlanIn):
 
 @app.post("/api/generate")
 def generate(req: PlanIn):
+    _check_req(req)
     return pipeline.generate(_session(req.session_id), req.model_dump())
 
 
 @app.get("/api/machine")
 def machine():
     exe = export.find_inkstitch()
-    return {"name": "Brother SE400", "hoop_mm": HOOP_MM, "speed_spm": export.SPEED_SPM,
-            "stitch_warn": export.STITCH_WARN, "inkstitch": bool(exe), "manual_steps": export.MANUAL_STEPS}
+    return {"formats": {k: {"label": v["label"], "machines": v["machines"], "palette": v["palette"]}
+                        for k, v in machines.FORMATS.items()},
+            "default_format": machines.DEFAULT_FORMAT, "hoops": machines.HOOPS,
+            "default_hoop": machines.DEFAULT_HOOP, "default_speed_spm": machines.DEFAULT_SPEED_SPM,
+            "stitch_warn": export.STITCH_WARN, "max_stitch_mm": export.MAX_STITCH_MM,
+            "inkstitch": bool(exe), "manual_steps": export.MANUAL_STEPS}
 
 
 @app.post("/api/export")
 def start_export(req: PlanIn):
-    """Generate the SVG and start a background .pes export through Ink/Stitch."""
+    """Generate the SVG and start a background machine-file export through Ink/Stitch."""
+    _check_req(req)
     if not export.find_inkstitch():
-        raise HTTPException(501, "Ink/Stitch isn't installed — export the .pes from Inkscape instead.")
+        raise HTTPException(501, "Ink/Stitch isn't installed — export the machine file from Inkscape instead.")
     s = _session(req.session_id)
     r = pipeline.generate(s, req.model_dump())
+    fmt = req.format.lower()
+    m = r["machine"]
     base = Path(s.filename).stem or "design"
-    jid = export.start_export(r["svg"], r["machine"]["thread_blocks"], req.fabric_hex, f"{base}-se400.pes")
+    hoop_w, hoop_h = m["hoop_mm"]
+    jid = export.start_export(r["svg"], fmt, m["thread_hexes"], req.fabric_hex, (hoop_w, hoop_h),
+                              m["speed_spm"], f"{base}-{hoop_w:g}x{hoop_h:g}mm.{fmt}")
     return {"job_id": jid}
 
 
@@ -115,10 +143,10 @@ def export_status(jid: str):
         j = export.job(jid)
     except KeyError as e:
         raise HTTPException(404, str(e))
-    return {k: v for k, v in j.items() if k != "pes"}
+    return {k: v for k, v in j.items() if k != "data"}
 
 
-@app.get("/api/export/{jid}/pes")
+@app.get("/api/export/{jid}/file")
 def export_file(jid: str):
     try:
         j = export.job(jid)
@@ -126,7 +154,7 @@ def export_file(jid: str):
         raise HTTPException(404, str(e))
     if j.get("status") != "done":
         raise HTTPException(409, "Export isn't finished.")
-    return Response(j["pes"], media_type="application/octet-stream",
+    return Response(j["data"], media_type="application/octet-stream",
                     headers={"Content-Disposition": f'attachment; filename="{j["filename"]}"'})
 
 

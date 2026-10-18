@@ -18,9 +18,10 @@ def client():
     return TestClient(app)
 
 
-def analyze(client, data, name, w=100, h=100, remove_bg="auto"):
+def analyze(client, data, name, w=100, h=100, remove_bg="auto", hoop=(100, 100)):
     r = client.post("/api/analyze", files={"file": (name, data)},
-                    data={"width_mm": w, "height_mm": h, "remove_bg": remove_bg})
+                    data={"width_mm": w, "height_mm": h, "remove_bg": remove_bg,
+                          "hoop_w": hoop[0], "hoop_h": hoop[1]})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -35,17 +36,18 @@ def layers_of(svg_text):
     return root, [g for g in root.iter(f"{SVG}g") if g.get(f"{INK}groupmode") == "layer"]
 
 
-def check_svg(svg_text, w_mm, h_mm):
-    """The canvas is always the SE400's 100×100 mm hoop; the w×h design is centered on it."""
+def check_svg(svg_text, w_mm, h_mm, hoop=(100, 100)):
+    """The canvas is the hoop's stitch field (default 4×4 = 100×100 mm); the w×h design is centered on it."""
     root, layers = layers_of(svg_text)
-    assert root.get("width") == "100mm"
-    assert root.get("height") == "100mm"
-    assert root.get("viewBox") == "0 0 100 100"
+    hw, hh = hoop
+    assert root.get("width") == f"{hw:g}mm"
+    assert root.get("height") == f"{hh:g}mm"
+    assert root.get("viewBox") == f"0 0 {hw:g} {hh:g}"
     paths = list(root.iter(f"{SVG}path"))
     assert paths, "no shapes were written"
     nums = [float(v) for p in paths for v in re.findall(r"-?\d+(?:\.\d+)?", p.get("d"))]
     xs, ys = nums[0::2], nums[1::2]
-    assert abs((min(xs) + max(xs)) / 2 - 50) < 1.5 and abs((min(ys) + max(ys)) / 2 - 50) < 1.5
+    assert abs((min(xs) + max(xs)) / 2 - hw / 2) < 1.5 and abs((min(ys) + max(ys)) / 2 - hh / 2) < 1.5
     assert max(xs) - min(xs) <= w_mm + 0.2 and max(ys) - min(ys) <= h_mm + 0.2
     for p in paths:
         if p.get(f"{STITCH}stroke_method"):       # outline mode: running-stitch centerline
@@ -99,6 +101,25 @@ def test_larger_than_hoop_is_blocked(client):
     r = client.post("/api/analyze", files={"file": ("logo.png", flat_logo_png())},
                     data={"width_mm": 110, "height_mm": 100})
     assert r.status_code == 400 and "100" in r.json()["detail"]
+
+
+def test_bigger_hoop_rotates_to_fit_landscape_design(client):
+    # 170×85 doesn't fit a 5×7 hoop upright (130 wide) but does rotated (180×130)
+    s = analyze(client, messy_traced_svg(), "trace.svg", w=170, h=85, hoop=(130, 180))
+    assert s["height_mm"] == 85
+    r = client.post("/api/generate", json=request(s, hoop_w=130, hoop_h=180, speed_spm=800)).json()
+    check_svg(r["svg"], s["width_mm"], s["height_mm"], hoop=(130, 180) if s["width_mm"] <= s["height_mm"] else (180, 130))
+    assert r["machine"]["speed_spm"] == 800
+    assert r["machine"]["estimated_minutes"] == round(r["machine"]["estimated_stitches"] / 800, 1)
+
+
+def test_hoop_limits_and_formats_validated(client):
+    r = client.post("/api/analyze", files={"file": ("logo.png", flat_logo_png())},
+                    data={"width_mm": 150, "height_mm": 150, "hoop_w": 130, "hoop_h": 180})
+    assert r.status_code == 400 and "130 × 180" in r.json()["detail"]
+    s = analyze(client, flat_logo_png(), "logo.png")
+    assert client.post("/api/generate", json=request(s, format="doc")).status_code == 400
+    assert client.post("/api/generate", json=request(s, format="jef")).status_code == 200
 
 
 def test_machine_summary(client):

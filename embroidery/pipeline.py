@@ -19,7 +19,8 @@ from shapely.ops import unary_union
 
 from . import colors as C
 from .palette import TRANSPARENT, analyze, edge_connected, frame_label
-from .export import EST_STITCHES_PER_MM2, HOOP_MM, SPEED_SPM, STITCH_WARN
+from . import machines as M
+from .export import EST_STITCHES_PER_MM2, STITCH_WARN
 from .raster import PX_PER_MM, rasterize
 from .svg_out import write_svg
 from .vectorize import LINE_PARAMS, band, mask_to_polygons, polygons, split_thin, stitch_params
@@ -423,13 +424,15 @@ def generate(s: Session, req: dict) -> dict:
     for n, layer in enumerate(layers, 1):
         layer["label"] = f"{n} {layer['label']}"
     _order_shapes(layers, Point(s.width_mm / 2, s.height_mm / 2))
-    machine = _machine_summary(layers)
+    hoop_w, hoop_h = M.oriented(s.width_mm, s.height_mm, *_hoop(req))
+    speed = req.get("speed_spm") or M.DEFAULT_SPEED_SPM
+    machine = _machine_summary(layers, speed, (hoop_w, hoop_h))
 
-    # The SVG canvas is the SE400 hoop; the design sits centered on it at (50, 50).
-    dx, dy = (HOOP_MM - s.width_mm) / 2, (HOOP_MM - s.height_mm) / 2
+    # The SVG canvas is the hoop's stitch field; the design sits centered on it.
+    dx, dy = (hoop_w - s.width_mm) / 2, (hoop_h - s.height_mm) / 2
     placed = [{**l, "shapes": [(translate(p, dx, dy), prm) for p, prm in l["shapes"]]} for l in layers]
     meta = {**plan["summary"]}
-    svg = write_svg(HOOP_MM, HOOP_MM, placed, meta)
+    svg = write_svg(hoop_w, hoop_h, placed, meta)
     preview, preview_marked, geo_warnings = _render_and_check(s, layers, fabric)
 
     plan["warnings"] = s.warnings + plan["warnings"] + machine.pop("warnings") + geo_warnings
@@ -446,11 +449,16 @@ def generate(s: Session, req: dict) -> dict:
     return plan
 
 
+def _hoop(req: dict) -> tuple[float, float]:
+    h = M.HOOPS[M.DEFAULT_HOOP]
+    return float(req.get("hoop_w") or h["w"]), float(req.get("hoop_h") or h["h"])
+
+
 def _order_shapes(layers: list[dict], start: Point) -> None:
     """Within each color, visit fills and outline lines in nearest-neighbor order,
     starting next to where the previous color finished, so stitching flows from a
-    fill into the outline that touches it. The SE400 doesn't trim, so every
-    remaining jump is a thread to cut by hand. Pure-fill colors get a 2-opt pass."""
+    fill into the outline that touches it. Most home machines don't trim jumps, so
+    every remaining jump is a thread to cut by hand. Pure-fill colors get a 2-opt pass."""
     cursor = start                        # the machine starts at hoop center
     for layer in layers:
         left = list(layer["shapes"])
@@ -497,8 +505,8 @@ def _two_opt(route: list, start) -> list:
     return [route[i] for i in best]
 
 
-def _machine_summary(layers: list[dict]) -> dict:
-    """Brother SE400 view: thread changes, estimated stitches and run time."""
+def _machine_summary(layers: list[dict], speed: float, hoop: tuple[float, float]) -> dict:
+    """Single-needle view: thread changes, estimated stitches and run time."""
     blocks: list[str] = []
     for layer in layers:
         if layer["shapes"] and (not blocks or blocks[-1] != layer["hex"]):
@@ -518,11 +526,11 @@ def _machine_summary(layers: list[dict]) -> dict:
     if est > STITCH_WARN:
         warnings.append({"level": "warn", "code": "stitch_count",
                          "message": f"About {est:,} stitches — over {STITCH_WARN:,}, roughly "
-                                    f"{est / SPEED_SPM:.0f} min of stitching on the SE400. Consider a smaller size "
+                                    f"{est / speed:.0f} min of stitching at {speed:g} spm. Consider a smaller size "
                                     "or leaving a large area as fabric."})
-    return {"thread_blocks": len(blocks), "thread_changes": max(0, len(blocks) - 1),
-            "estimated_stitches": est, "estimated_minutes": round(est / SPEED_SPM, 1),
-            "estimated_jumps": jumps, "hoop_mm": HOOP_MM, "warnings": warnings}
+    return {"thread_blocks": len(blocks), "thread_changes": max(0, len(blocks) - 1), "thread_hexes": blocks,
+            "estimated_stitches": est, "estimated_minutes": round(est / speed, 1),
+            "estimated_jumps": jumps, "hoop_mm": list(hoop), "speed_spm": speed, "warnings": warnings}
 
 
 def _fill(mask: np.ndarray, poly: Polygon) -> None:

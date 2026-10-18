@@ -1,4 +1,4 @@
-"""Brother SE400 .pes route: verification logic, plus a real Ink/Stitch export when installed."""
+"""Machine-file route: verification logic, plus real Ink/Stitch exports when installed."""
 import io
 
 import pyembroidery as pe
@@ -36,7 +36,7 @@ def test_analyze_pes_finds_hand_trims_and_colors():
     _square(p, 300, 300, 200)
     p.add_command(pe.END)
 
-    r = export.analyze_pes(_pes(p), expected_colors=2)
+    r = export.analyze_file(_pes(p), "pes", expected_colors=2)
     assert r["ok"], r["problems"]
     assert r["signature"].startswith("#PES")
     assert r["color_blocks"] == 2 and r["thread_changes"] == 1
@@ -50,8 +50,27 @@ def test_analyze_pes_flags_oversize():
     p.add_thread(pe.EmbThread("#000000"))
     _square(p, 0, 0, 1100, step=50)            # 110 mm wide
     p.add_command(pe.END)
-    r = export.analyze_pes(_pes(p))
-    assert not r["ok"] and any("100×100" in x for x in r["problems"])
+    r = export.analyze_file(_pes(p))
+    assert not r["ok"] and any("100 × 100 mm hoop" in x for x in r["problems"])
+    # the same 110 mm design fits a 5×7 hoop
+    assert export.analyze_file(_pes(p), hoop=(130, 180))["ok"]
+
+
+def test_analyze_jef_and_dst():
+    p = pe.EmbPattern()
+    p.add_thread(pe.EmbThread("#000080"))
+    p.add_thread(pe.EmbThread("#ff0000"))
+    _square(p, 0, 0, 200)
+    p.add_command(pe.COLOR_CHANGE)
+    _square(p, 300, 300, 200)
+    p.add_command(pe.END)
+    for fmt, writer in (("jef", pe.write_jef), ("dst", pe.write_dst)):
+        buf = io.BytesIO()
+        writer(p, buf)
+        r = export.analyze_file(buf.getvalue(), fmt, expected_colors=2)
+        assert r["ok"], (fmt, r["problems"])
+        assert r["format"] == fmt and r["color_blocks"] == 2
+    assert r["palette"] is None and r["threads"][0]["hex"] is None   # DST stores no colors
 
 
 @pytest.mark.inkstitch
@@ -60,8 +79,8 @@ def test_inkstitch_export_is_se400_ready():
     s = pipeline.new_session(flat_logo_png(), "logo.png", 100, 100, None)
     g = pipeline.generate(s, {"fabric_hex": "#ffffff",
                               "colors": [{"id": i, "hex": h} for i, h in enumerate(s.hexes)]})
-    data = export.export_pes(g["svg"])
-    r = export.analyze_pes(data, g["machine"]["thread_blocks"])
+    data = export.export_file(g["svg"], "pes")
+    r = export.analyze_file(data, "pes", g["machine"]["thread_blocks"])
     assert r["ok"], r["problems"]
     assert r["extent_mm"][0] <= 100 and r["extent_mm"][1] <= 100
     assert r["color_blocks"] == 2 and r["stitches"] > 1000
@@ -76,8 +95,21 @@ def test_inkstitch_exports_outline_lines():
     g = pipeline.generate(s, {"fabric_hex": "#ffffff",
                               "colors": [{"id": i, "hex": h} for i, h in enumerate(s.hexes)]})
     assert any(l["lines"] for l in g["layers"])
-    r = export.analyze_pes(export.export_pes(g["svg"]), g["machine"]["thread_blocks"])
+    r = export.analyze_file(export.export_file(g["svg"], "pes"), "pes", g["machine"]["thread_blocks"])
     assert r["ok"], r["problems"]
     black = next(t for t in r["threads"] if t["hex"] < "#303030")
     # a ~300 mm ring as a triple run of 2 mm stitches is ~450 stitches; a fill would be far more
     assert 250 < black["stitches"] < 2500
+
+
+@pytest.mark.inkstitch
+@pytest.mark.skipif(not export.find_inkstitch(), reason="Ink/Stitch not installed")
+@pytest.mark.parametrize("fmt", ["jef", "dst"])
+def test_inkstitch_exports_other_formats_on_bigger_hoop(fmt):
+    s = pipeline.new_session(flat_logo_png(), "logo.png", 120, 120, None)
+    g = pipeline.generate(s, {"fabric_hex": "#ffffff", "hoop_w": 130, "hoop_h": 180,
+                              "colors": [{"id": i, "hex": h} for i, h in enumerate(s.hexes)]})
+    r = export.analyze_file(export.export_file(g["svg"], fmt), fmt, g["machine"]["thread_blocks"],
+                            hoop=(130, 180))
+    assert r["ok"], r["problems"]
+    assert 115 < max(r["extent_mm"]) <= 121

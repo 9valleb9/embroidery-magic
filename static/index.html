@@ -122,7 +122,7 @@
 </style>
 </head>
 <body>
-<header><h1>Embroidery Magic</h1><span>logo → Ink/Stitch SVG → Brother SE400 .pes</span></header>
+<header><h1>Embroidery Magic</h1><span>logo → Ink/Stitch SVG → .pes / .jef / .vp3 / .exp / .xxx / .dst</span></header>
 <main>
   <!-- ---------------------------------------------------------------- input -->
   <section>
@@ -132,13 +132,30 @@
     </div>
     <input type="file" id="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" hidden>
 
+    <label class="field" for="format">Machine</label>
+    <select id="format"></select>
+    <div class="hint" id="formatHint"></div>
+    <select id="hoop" aria-label="Hoop size" style="margin-top:6px"></select>
+    <div class="row" id="customHoop" hidden style="margin-top:6px">
+      <input type="number" id="hoopW" min="10" max="400" step="1" aria-label="Hoop width mm">
+      <span style="flex:0">×</span>
+      <input type="number" id="hoopH" min="10" max="400" step="1" aria-label="Hoop height mm">
+      <span class="hint" style="flex:0;margin:0">mm</span>
+    </div>
+    <div class="row" style="margin-top:6px;align-items:center">
+      <span class="hint" style="margin:0;white-space:nowrap">Machine speed</span>
+      <input type="number" id="speed" min="50" max="2000" step="10" aria-label="Machine speed (stitches per minute)"
+             title="Your machine's embroidery speed, for the stitch-time estimate">
+      <span class="hint" style="flex:0;margin:0;white-space:nowrap">stitches/min</span>
+    </div>
+
     <label class="field">Final size (mm, aspect ratio kept)</label>
     <div class="row">
-      <input type="number" id="w" value="100" min="5" max="100" step="1" aria-label="Width mm">
+      <input type="number" id="w" value="100" min="5" step="1" aria-label="Width mm">
       <span style="flex:0">×</span>
-      <input type="number" id="h" value="100" min="5" max="100" step="1" aria-label="Height mm">
+      <input type="number" id="h" value="100" min="5" step="1" aria-label="Height mm">
     </div>
-    <div class="hint" id="actualSize">SE400 hoop: 100 × 100 mm max. The design is fitted inside this box and centered in the hoop.</div>
+    <div class="hint" id="actualSize">The design is fitted inside this box and centered in the hoop.</div>
 
     <div id="bgBox" hidden>
       <label class="field" style="display:flex;gap:8px;align-items:center;font-weight:600">
@@ -207,9 +224,9 @@
       <div style="margin-top:12px"><a class="btn" id="download" download="design.svg"
         style="border:1px solid var(--line);border-radius:6px;padding:9px;color:var(--ink)">Download SVG</a></div>
 
-      <h3>Brother SE400</h3>
+      <h3 id="machineTitle">Machine file</h3>
       <div class="kv" id="machineKv"></div>
-      <button class="primary" id="exportBtn">Export .pes for SE400</button>
+      <button class="primary" id="exportBtn">Export machine file</button>
       <div id="exportOut"></div>
     </div>
     <div id="planWarnings"></div>
@@ -228,6 +245,7 @@ const state = {
   outlines: new Set(), border: false, thinLines: true,
   plan: null, result: null, resultKey: null, tab: "live",
   labelData: null,       // ImageData of the label map
+  machine: { format: "pes", hoop: "4x4", hoopW: 100, hoopH: 100, speed: 400 },
 };
 
 // ------------------------------------------------------------------ helpers
@@ -250,6 +268,8 @@ function planRequest() {
     colors: state.colors.map(c => ({ id: c.id, hex: c.hex, fabric: c.fabric, merged_into: c.merged_into,
                                      was_fabric: c.was_fabric, restored_from: c.restored_from })),
     order: state.order, outlines: [...state.outlines], border: state.border, thin_lines: state.thinLines,
+    hoop_w: state.machine.hoopW, hoop_h: state.machine.hoopH, format: state.machine.format,
+    speed_spm: state.machine.speed,
   };
 }
 
@@ -271,10 +291,13 @@ function setFile(f) {
   analyze();
 }
 
+const fits = (w, h, hw, hh) => (w <= hw + .05 && h <= hh + .05) || (w <= hh + .05 && h <= hw + .05);
 function sizeOk() {
-  const w = +$("w").value, h = +$("h").value;
-  if (w > 100 || h > 100) { showError("The Brother SE400 stitch field is 100 × 100 mm — choose a size up to 100 mm."); return false; }
+  const w = +$("w").value, h = +$("h").value, m = state.machine;
+  if (!(m.hoopW >= 10 && m.hoopH >= 10)) { showError("Enter the hoop's stitch field in mm."); return false; }
+  if (!fits(w, h, m.hoopW, m.hoopH)) { showError(`${w} × ${h} mm doesn't fit the ${m.hoopW} × ${m.hoopH} mm hoop — choose a smaller size or a bigger hoop.`); return false; }
   if (!(w >= 5 && h >= 5)) { showError("Size must be at least 5 mm."); return false; }
+  showError(null);
   return true;
 }
 const reanalyze = debounce(() => state.file && sizeOk() && analyze(), 500);
@@ -288,6 +311,8 @@ async function analyze() {
   fd.append("file", state.file);
   fd.append("width_mm", $("w").value || 100);
   fd.append("height_mm", $("h").value || 100);
+  fd.append("hoop_w", state.machine.hoopW);
+  fd.append("hoop_h", state.machine.hoopH);
   fd.append("n_colors", $("k").value);
   fd.append("remove_bg", state.removeBg);
   $("generate").disabled = true;
@@ -302,7 +327,7 @@ async function analyze() {
     state.order = null; state.outlines.clear(); state.border = false;
     state.prevFabric = null; state.result = null; state.export = null;
     lockTabs([]); if (state.tab !== "live") state.tab = "live";
-    $("actualSize").textContent = `Output: ${s.width_mm} × ${s.height_mm} mm, centered in the 100 × 100 mm hoop`;
+    $("actualSize").textContent = `Output: ${s.width_mm} × ${s.height_mm} mm, centered in the ${state.machine.hoopW} × ${state.machine.hoopH} mm hoop`;
     renderBackground(s.background);
     $("kHint").textContent = `Suggested: ${s.suggested_k} color${s.suggested_k === 1 ? "" : "s"}` + ($("k").value === "auto" ? "" : ` (using ${s.k})`);
     await loadLabels(s.label_png);
@@ -565,7 +590,7 @@ function showTab(tab) {
   $("stageBadge").hidden = !has;
   $("stageBadge").textContent = tab === "live" ? "live · on " + (state.plan?.summary.fabric_name || "fabric").toLowerCase()
     : tab === "problems" ? "red = gaps < 0.6 mm · orange = < 1 mm wide"
-    : tab === "stitchout" ? "from the .pes · 100 mm hoop · red = trim by hand" : "stitched shapes";
+    : tab === "stitchout" ? `from the ${state.export?.report ? "." + state.export.report.format : "machine"} file · whole hoop · red = trim by hand` : "stitched shapes";
   $("stale").hidden = !(state.result && tab !== "live" && isStale());
 }
 const TAB_NEEDS = { result: "generate", problems: "generate", stitchout: "export" };
@@ -574,7 +599,7 @@ function lockTabs(unlocked) {
     const locked = b.dataset.tab !== "live" && !unlocked.includes(b.dataset.tab);
     b.classList.toggle("locked", locked);
     b.title = !locked ? "" : TAB_NEEDS[b.dataset.tab] === "export"
-      ? "Export the .pes first" : "Click Generate SVG first";
+      ? "Export the machine file first" : "Click Generate SVG first";
   });
   $("tabsHint").textContent = "";
 }
@@ -584,7 +609,7 @@ $("tabs").addEventListener("click", (e) => {
   if (!b.classList.contains("locked")) { $("tabsHint").textContent = ""; return showTab(b.dataset.tab); }
   const target = TAB_NEEDS[b.dataset.tab] === "export" && state.result ? $("exportBtn") : $("generate");
   $("tabsHint").textContent = !state.labelData ? "Drop an image first."
-    : TAB_NEEDS[b.dataset.tab] === "export" && state.result ? "Click “Export .pes for SE400” below first — this view is drawn from the real .pes."
+    : TAB_NEEDS[b.dataset.tab] === "export" && state.result ? `Click “Export .${state.machine.format}” below first — this view is drawn from the real machine file.`
     : "Click “Generate SVG” below first.";
   if (target) { target.classList.remove("nudge"); void target.offsetWidth; target.classList.add("nudge"); }
 });
@@ -638,20 +663,82 @@ function renderResult() {
   a.download = `${base}-embroidery.svg`;
 }
 
-// ------------------------------------------------------------------ Brother SE400
-const MACHINE = { inkstitch: null, manual_steps: [] };
-fetch("/api/machine").then(r => r.json()).then(m => Object.assign(MACHINE, m)).catch(() => {});
+// ------------------------------------------------------------------ machine
+const MACHINE = { inkstitch: null, manual_steps: [], formats: {}, hoops: {} };
+const fmtLabel = () => "." + state.machine.format;
+const hoopText = (w, h) => `${w} × ${h} mm`;
+
+function saveMachine() { try { localStorage.setItem("machine", JSON.stringify(state.machine)); } catch {} }
+function loadMachine() {
+  try { const m = JSON.parse(localStorage.getItem("machine") || "null"); if (m && m.format) Object.assign(state.machine, m); } catch {}
+}
+
+function renderMachinePickers() {
+  const m = state.machine;
+  $("format").innerHTML = Object.entries(MACHINE.formats).map(([k, f]) =>
+    `<option value="${k}"${k === m.format ? " selected" : ""}>${esc(f.label)}</option>`).join("");
+  $("formatHint").textContent = MACHINE.formats[m.format]?.machines || "";
+  $("hoop").innerHTML = Object.entries(MACHINE.hoops).map(([k, h]) =>
+    `<option value="${k}"${k === m.hoop ? " selected" : ""}>Hoop ${esc(h.label)}</option>`).join("")
+    + `<option value="custom"${m.hoop === "custom" ? " selected" : ""}>Hoop: custom size…</option>`;
+  $("customHoop").hidden = m.hoop !== "custom";
+  $("hoopW").value = m.hoopW; $("hoopH").value = m.hoopH;
+  $("speed").value = m.speed;
+  $("exportBtn").textContent = `Export ${fmtLabel()}`;
+}
+
+function setHoop(w, h) {
+  const m = state.machine;
+  m.hoopW = w; m.hoopH = h; saveMachine();
+  // new hoop: fill it, turned to match the image (wide logo, landscape box); aspect ratio is kept inside
+  const wide = state.session && state.session.width_mm > state.session.height_mm;
+  $("w").value = wide ? Math.max(w, h) : Math.min(w, h);
+  $("h").value = wide ? Math.min(w, h) : Math.max(w, h);
+  renderMachinePickers();
+  if (state.file && sizeOk()) analyze(); else sizeOk();
+}
+$("format").addEventListener("change", (e) => {
+  state.machine.format = e.target.value; saveMachine(); renderMachinePickers(); markStale();
+  if (state.result) { state.export = null; lockTabs(["result", "problems"]); renderExport(); }
+});
+$("hoop").addEventListener("change", (e) => {
+  state.machine.hoop = e.target.value;
+  if (e.target.value === "custom") { saveMachine(); renderMachinePickers(); return; }
+  const h = MACHINE.hoops[e.target.value];
+  setHoop(h.w, h.h);
+});
+const customHoop = debounce(() => {
+  const w = +$("hoopW").value, h = +$("hoopH").value;
+  if (w >= 10 && h >= 10 && w <= 400 && h <= 400) setHoop(w, h);
+  else showError("Hoop size must be between 10 and 400 mm.");
+}, 600);
+$("hoopW").addEventListener("input", customHoop);
+$("hoopH").addEventListener("input", customHoop);
+$("speed").addEventListener("input", debounce(() => {
+  const v = +$("speed").value;
+  if (v >= 50 && v <= 2000) { state.machine.speed = v; saveMachine(); markStale(); }
+}, 400));
+
+loadMachine();
+fetch("/api/machine").then(r => r.json()).then(m => {
+  Object.assign(MACHINE, m);
+  if (!MACHINE.formats[state.machine.format]) state.machine.format = m.default_format;
+  renderMachinePickers();
+  $("w").value = state.machine.hoopW; $("h").value = state.machine.hoopH;
+}).catch(() => {});
 
 function renderMachine() {
   const m = state.result.machine, ex = state.export?.report;
   const stitches = ex ? ex.stitches : m.estimated_stitches;
   const mins = ex ? ex.minutes : m.estimated_minutes;
   const changes = ex ? ex.thread_changes : m.thread_changes;
+  const jumps = ex ? ex.trims.length : m.estimated_jumps;
+  $("machineTitle").textContent = `${MACHINE.formats[state.machine.format]?.label || "Machine file"} · ${hoopText(...m.hoop_mm)} hoop`;
   $("machineKv").innerHTML = `
     <span>Thread changes</span><b>${changes} (${changes + 1} color${changes ? "s" : ""}, single needle)</b>
     <span>Stitches</span><b>${ex ? "" : "≈ "}${stitches.toLocaleString()}${stitches > 25000 ? " ⚠︎ long run" : ""}</b>
-    <span>Stitch time</span><b>${ex ? "" : "≈ "}${mins} min at 400 spm</b>
-    <span>Hand trims</span><b>${ex ? ex.trims.length : "≈ " + m.estimated_jumps} jump${(ex ? ex.trims.length : m.estimated_jumps) === 1 ? "" : "s"} (SE400 doesn't auto-trim)</b>`;
+    <span>Stitch time</span><b>${ex ? "" : "≈ "}${mins} min at ${m.speed_spm} spm</b>
+    <span>Jumps to trim</span><b>${ex ? "" : "≈ "}${jumps} (by hand, unless your machine trims jumps)</b>`;
 }
 
 function renderExport() {
@@ -659,49 +746,54 @@ function renderExport() {
   if (!state.result) return;
   renderMachine();
   const ex = state.export;
-  btn.hidden = false; btn.disabled = false; btn.textContent = "Export .pes for SE400";
+  btn.hidden = false; btn.disabled = false; btn.textContent = `Export ${fmtLabel()}`;
   if (MACHINE.inkstitch === false) {
     btn.hidden = true;
-    out.innerHTML = `<div class="warn info">Ink/Stitch wasn't found, so the .pes can't be made here. From the SVG:
+    out.innerHTML = `<div class="warn info">Ink/Stitch wasn't found, so the machine file can't be made here. From the SVG:
       <ol>${MACHINE.manual_steps.map(x => `<li>${esc(x)}</li>`).join("")}</ol></div>`;
     return;
   }
   if (!ex) { out.innerHTML = ""; return; }
   if (ex.status === "running") {
     btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>Ink/Stitch is building stitches…`;
-    out.innerHTML = `<div class="hint">Usually 20–40 seconds.</div>`;
+    out.innerHTML = `<div class="hint">Usually 20–60 seconds.</div>`;
     return;
   }
   if (ex.status === "error") { out.innerHTML = `<div class="warn">${esc(ex.error)}</div>`; return; }
-  const r = ex.report;
+  const r = ex.report, ext = "." + r.format;
+  const [hw, hh] = r.hoop_mm;
   const stitched = [];
   for (const t of state.result.summary.threads)
     if (t.order && (!stitched.length || stitched[stitched.length - 1].hex !== t.hex)) stitched.push(t);
   const checks = [
-    [r.signature.startsWith("#PES"), `Brother PES file (${esc(r.signature)}, ${(r.size_bytes / 1024).toFixed(0)} KB), read back OK`],
-    [r.extent_mm[0] <= 100 && r.extent_mm[1] <= 100, `Stitches span ${r.extent_mm[0]} × ${r.extent_mm[1]} mm — fits the 100 × 100 mm field (the SE400 centers it in the hoop)`],
-    [r.longest_stitch_mm <= 12.1, `Longest stitch ${r.longest_stitch_mm} mm (limit 12.7 mm)`],
+    [!r.problems.some(p => p.includes("signature")), `${ext} file${r.signature ? ` (${esc(r.signature)})` : ""}, ${(r.size_bytes / 1024).toFixed(0)} KB, read back OK`],
+    [fits(r.extent_mm[0], r.extent_mm[1], hw, hh), `Stitches span ${r.extent_mm[0]} × ${r.extent_mm[1]} mm — fits the ${hoopText(hw, hh)} hoop (the machine centers it)`],
+    [r.longest_stitch_mm <= r.max_stitch_mm, `Longest stitch ${r.longest_stitch_mm} mm (limit ${r.max_stitch_mm} mm)`],
     [r.color_blocks === state.result.machine.thread_blocks, `${r.color_blocks} color block${r.color_blocks === 1 ? "" : "s"}, each color stitched once`],
   ];
+  const screen = (t) => r.palette
+    ? `screen: <span class="sw" style="background:${t.hex}"></span>${esc(t.machine_name || t.hex)}`
+    : `stop ${t.order}`;
   out.innerHTML = `
     <ul class="checks">${checks.map(([ok, t]) => `<li class="${ok ? "" : "bad"}">${t}</li>`).join("")}</ul>
     ${r.problems.map(p => `<div class="warn">${esc(p)}</div>`).join("")}
-    ${r.stitches > 25000 ? `<div class="warn">${r.stitches.toLocaleString()} stitches — about ${r.minutes} min on the SE400.</div>` : ""}
-    <h3>Thread changes on the SE400</h3>
+    ${r.stitches > 25000 ? `<div class="warn">${r.stitches.toLocaleString()} stitches — about ${r.minutes} min at ${r.speed_spm} spm.</div>` : ""}
+    <h3>Thread changes</h3>
     <table class="summary">${r.threads.map((t, i) => { const mine = stitched[i]; return `<tr><td>${t.order}</td>
       <td>${mine ? `<span class="sw" style="background:${mine.hex}"></span>${esc(mine.name)}` : ""}</td>
-      <td style="color:var(--muted)">screen: <span class="sw" style="background:${t.hex}"></span>${esc(t.brother_name || t.hex)}</td>
-      <td>${t.stitches.toLocaleString()} st · ${(t.stitches / 400).toFixed(1)} min</td></tr>`; }).join("")}</table>
-    <div class="hint">.pes stores colors as Brother palette entries, so the SE400's screen shows the nearest Brother name
-      at each stop — load your actual thread (left column).</div>
-    <h3>Trim these jumps by hand</h3>
+      <td style="color:var(--muted)">${screen(t)}</td>
+      <td>${t.stitches.toLocaleString()} st · ${(t.stitches / r.speed_spm).toFixed(1)} min</td></tr>`; }).join("")}</table>
+    <div class="hint">${r.palette
+      ? `${ext} stores colors as ${r.palette} palette entries, so the machine's screen shows the nearest ${r.palette} name at each stop — load your actual thread (left column).`
+      : `${ext} doesn't store thread colors — the machine just stops between colors. Load them in the order on the left.`}</div>
+    <h3>Jumps to trim</h3>
     ${r.trims.length ? `<table class="trims"><tr><th>#</th><th>Color</th><th>From → to (mm from hoop top-left)</th><th>Length</th></tr>
       ${r.trims.map(t => `<tr><td><span class="pill">${t.number}</span></td><td>${t.color}. ${esc(stitched[t.color - 1]?.name || t.color_name)}</td>
         <td>(${t.from_mm.join(", ")}) → (${t.to_mm.join(", ")})</td><td>${t.length_mm} mm</td></tr>`).join("")}</table>
-      <div class="hint">The SE400 doesn't cut jump threads between shapes. Snip each one after its color finishes
-        (they're numbered on the Stitch-out tab).</div>`
-      : `<div class="hint">No jumps within a color — nothing to trim by hand besides the color changes.</div>`}
-    <div style="margin-top:12px"><a class="btn primary" href="/api/export/${ex.job_id}/pes" download>Download .pes</a></div>`;
+      <div class="hint">Jumps between shapes of the same color. Machines without automatic jump trimming (like the
+        Brother SE400) leave these as loose threads — snip each one after its color finishes (numbered on the Stitch-out tab).</div>`
+      : `<div class="hint">No jumps within a color — nothing to trim besides the color changes.</div>`}
+    <div style="margin-top:12px"><a class="btn primary" href="/api/export/${ex.job_id}/file" download>Download ${ext}</a></div>`;
 }
 
 $("exportBtn").addEventListener("click", async () => {
