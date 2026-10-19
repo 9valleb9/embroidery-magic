@@ -32,7 +32,7 @@ docker run --rm -p 8765:8765 $(docker build -q https://github.com/9valleb9/embro
 
 Then open <http://localhost:8765>.
 
-**With Python** (macOS shown):
+**With Python** (macOS shown, see [Requirements](#requirements) for Linux and Windows):
 
 ```bash
 brew install cairo            # needed by cairosvg for SVG input
@@ -42,7 +42,29 @@ pip install -r requirements.txt
 python app.py                 # opens http://127.0.0.1:8765
 ```
 
-To make machine files directly, also install [Inkscape](https://inkscape.org) and the [Ink/Stitch](https://inkstitch.org) extension. The app finds Ink/Stitch in the standard extension folders; set `INKSTITCH_BIN=/path/to/inkstitch` to point it somewhere else. Without it you still get the Ink/Stitch SVG, plus steps for exporting by hand. `PORT=9000` changes the port and `NO_BROWSER=1` skips opening the browser.
+Next time, just `cd embroidery-magic && source .venv/bin/activate && python app.py`. After `git pull`, run `pip install -r requirements.txt` again and hard-reload the page.
+
+## Requirements
+
+| What | Version | Needed for |
+|---|---|---|
+| Python | 3.11 or newer (tested on 3.11 and 3.13) | Everything |
+| Python packages | `pip install -r requirements.txt`: FastAPI, uvicorn, OpenCV (headless), Shapely 2, NumPy, Pillow, CairoSVG, scikit-learn, scikit-image, SciPy, pyembroidery, plus pytest/httpx for the tests | Everything |
+| Cairo library | macOS `brew install cairo` · Debian/Ubuntu `sudo apt install libcairo2` · Windows: the GTK runtime (or use Docker) | SVG input (PNG/JPG work without it) |
+| [Ink/Stitch](https://inkstitch.org/docs/install/) | 3.3.0 (3.x needed) | Exporting .pes/.jef/.vp3/.exp/.xxx/.dst directly. Without it you get the Ink/Stitch SVG and steps to export by hand in Inkscape |
+| Xvfb | Linux only: `sudo apt install xvfb`, then point `INKSTITCH_BIN` at a wrapper that runs `xvfb-run -a .../inkstitch "$@"` | Ink/Stitch needs a display even when exporting from the command line |
+| A web browser | Any current one | The UI |
+
+Ink/Stitch is found in the standard Inkscape extension folders on macOS and Linux, or on `PATH`. On Windows, set `INKSTITCH_BIN` to its `inkstitch.exe`. Docker and Codespaces include everything above.
+
+Settings (environment variables):
+
+| Variable | Default | |
+|---|---|---|
+| `INKSTITCH_BIN` | auto-detected | Path to the `inkstitch` executable |
+| `PORT` | `8765` | Port to serve on |
+| `HOST` | `127.0.0.1` | Use `0.0.0.0` to reach it from another device |
+| `NO_BROWSER` | unset | Set to `1` to not open a browser tab on start |
 
 Sample inputs are in `samples/`: the mountain badge above, a flat 3-color logo, and a messy auto-traced SVG with 400 specks, a hidden layer, an embedded bitmap and a stroke-only shape.
 
