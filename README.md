@@ -1,3 +1,5 @@
+<img src="static/logo.svg" alt="Embroidery Magic logo" width="96">
+
 # Embroidery Magic
 
 [![tests](https://github.com/9valleb9/embroidery-magic/actions/workflows/test.yml/badge.svg)](https://github.com/9valleb9/embroidery-magic/actions/workflows/test.yml)
@@ -184,6 +186,7 @@ embroidery/machines.py  file formats by brand, hoop sizes, fit + orientation
 embroidery/fabrics.py   fabric types: stitch settings, stabilizer, needle, notes
 embroidery/export.py    Ink/Stitch machine-file export, pyembroidery verification, jump-trim list
 static/index.html       single-page UI (no build step)
+static/logo.svg         app logo (header, browser tab, README)
 Dockerfile              app + Ink/Stitch in one image
 tests/                  pytest + synthetic fixtures
 samples/                example inputs

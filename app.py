@@ -64,6 +64,11 @@ def index():
     return FileResponse(HERE / "static" / "index.html")
 
 
+@app.get("/logo.svg")
+def logo():
+    return FileResponse(HERE / "static" / "logo.svg", media_type="image/svg+xml")
+
+
 @app.post("/api/analyze")
 async def analyze(file: UploadFile = File(...), width_mm: float = Form(99), height_mm: float = Form(99),
                   hoop_w: float = Form(100), hoop_h: float = Form(100),

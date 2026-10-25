@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Embroidery Magic</title>
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
 <style>
   :root {
     --bg: #f4f2ee; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6a67; --line: #e2dfd8;
@@ -13,8 +14,9 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink);
          font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
-  header { display: flex; align-items: baseline; gap: 12px; padding: 16px 24px 8px; }
-  header h1 { margin: 0; font-size: 19px; letter-spacing: -0.01em; }
+  header { display: flex; align-items: center; gap: 12px; padding: 16px 24px 8px; }
+  header h1 { margin: 0; font-size: 19px; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; }
+  header h1 img { width: 30px; height: 30px; }
   header span { color: var(--muted); }
   main { display: grid; grid-template-columns: 320px minmax(340px, 1fr) minmax(360px, 1.1fr);
          gap: 16px; padding: 8px 24px 32px; align-items: start; }
@@ -128,7 +130,7 @@
 </style>
 </head>
 <body>
-<header><h1>Embroidery Magic</h1><span>logo → Ink/Stitch SVG → .pes / .jef / .vp3 / .exp / .xxx / .dst</span></header>
+<header><h1><img src="/logo.svg" alt="">Embroidery Magic</h1><span>logo → Ink/Stitch SVG → .pes / .jef / .vp3 / .exp / .xxx / .dst</span></header>
 <main>
   <!-- ---------------------------------------------------------------- input -->
   <section>
