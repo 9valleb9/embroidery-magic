@@ -269,6 +269,7 @@ SATIN_STEP_MM = 0.5        # rail node spacing
 SATIN_MAX_TURN_DEG = 50    # skeleton pieces meeting straighter than this are one column
 SATIN_MAX_SPILL = 0.08     # share of a column allowed outside the shape
 SATIN_SPACING_MM = 0.4     # Ink/Stitch's default zig-zag spacing
+SATIN_EDGE_MM = 0.6        # leftover strips this close to a column are part of its edge, not a fill
 
 
 class Satin:
@@ -347,22 +348,17 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
             out.append(sat)
     if not out:
         return mask, []
-    # What's left is filled. It reaches 0.3 mm under the columns so junctions don't leave
-    # fabric showing, then slivers left along the columns' edges are dropped.
+    # What's left is filled. First everything within EDGE_MM of a column is set aside: that
+    # removes the strip between a column's rails and the shape's edge, which would otherwise be
+    # stitched twice (satin, then a contour fill over its edge). Pieces that survive (serifs,
+    # junction centers, wide areas) then grow back to tuck 0.3 mm under the columns.
     disk = lambda mm: cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, round(mm * PX_PER_MM) | 1),) * 2)
-    rest = mask & ~cv2.erode(covered, disk(0.3)).astype(bool)
-    # A leftover piece lying wholly along a column, and too small or too thin to fill, is a
-    # sliver of its edge: drop it. Anything reaching further (serifs, hairlines) stays whole.
-    opened = cv2.morphologyEx(rest.astype(np.uint8), cv2.MORPH_OPEN, disk(0.6)).astype(bool)
-    near = cv2.dilate(covered, disk(1.0)).astype(bool)
-    n, cc = cv2.connectedComponents(rest.astype(np.uint8), connectivity=8)
-    idx = cc.ravel()
-    area = np.bincount(idx, minlength=n)
-    away = np.bincount(idx, weights=(rest & ~near).ravel(), minlength=n)
-    solid = np.bincount(idx, weights=opened.ravel(), minlength=n)
-    drop = (away == 0) & ((area < PX_PER_MM ** 2) | (solid == 0))
-    drop[0] = True
-    return rest & ~drop[cc], out
+    core = mask & ~cv2.dilate(covered, disk(2 * SATIN_EDGE_MM)).astype(bool)
+    n, cc, stats, _ = cv2.connectedComponentsWithStats(core.astype(np.uint8), connectivity=8)
+    keep = np.flatnonzero(stats[1:, cv2.CC_STAT_AREA] >= 0.5 * PX_PER_MM ** 2) + 1
+    core = np.isin(cc, keep)
+    grown = cv2.dilate(core.astype(np.uint8), disk(2 * (SATIN_EDGE_MM + 0.3))).astype(bool)
+    return mask & grown, out
 
 
 def _fill_mm(mask: np.ndarray, poly: Polygon) -> None:

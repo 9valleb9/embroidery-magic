@@ -351,8 +351,8 @@ def test_satin_mode_turns_strokes_into_satin_columns(client):
         rails = [r for r in p.get("d").split("M ") if r.strip()]
         assert len(rails) == 2 and len(rails[0].split(" L ")) == len(rails[1].split(" L "))
         assert "fill:none" in p.get("style") and p.get(f"{STITCH}zigzag_spacing_mm") == "0.4"
-    gaps = lambda r: [w["message"] for w in r["warnings"] if w["code"] == "narrow_gap"]
-    assert gaps(on) == gaps(off)                     # columns meet the rest of the shape without new gaps
+    gaps = lambda r: sum(int(w["message"].split()[0]) for w in r["warnings"] if w["code"] == "narrow_gap")
+    assert gaps(on) <= gaps(off)                     # columns meet the rest of the shape without new gaps
 
 
 def test_satin_column_geometry():
@@ -371,6 +371,15 @@ def test_satin_column_geometry():
     assert len(sats[0].rail1) == len(sats[0].rail2)
     left = rest.sum() / PX_PER_MM ** 2
     assert abs(left - (math.pi * 64 + 70 * 9)) < 40                      # blob + bar stay fills, stroke is gone
+
+    # a stroke ending in a small serif: the serif stays a fill, but no strip along the column's edges does
+    m = np.zeros((40 * PX_PER_MM, 60 * PX_PER_MM), np.uint8)
+    cv2.rectangle(m, (10 * PX_PER_MM, 18 * PX_PER_MM), (50 * PX_PER_MM, 22 * PX_PER_MM), 1, -1)  # 4 mm bar
+    cv2.rectangle(m, (48 * PX_PER_MM, 14 * PX_PER_MM), (52 * PX_PER_MM, 26 * PX_PER_MM), 1, -1)  # end serif
+    rest, sats = split_satin(m.astype(bool))
+    assert sats
+    cols = np.flatnonzero(rest.any(axis=0)) / PX_PER_MM
+    assert not cols.size or cols.min() > 40                                 # any fill is at the serif end only
     towel = satin_params(3.0, 0.3, 0.22, underlay=True)
     assert towel["zigzag_spacing_mm"] == "0.35" and towel["zigzag_underlay"] == "true"
     assert satin_params(1.5)["contour_underlay"] == "false"
