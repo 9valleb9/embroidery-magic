@@ -201,6 +201,11 @@
       <input type="checkbox" id="thinLines" checked style="margin-top:2px">
       <span><b>Stitch thin lines as outlines</b> — features under 1 mm wide become a triple running stitch
         (fills can't hold them). Cleaner lines, but usually a few more jumps to trim.</span></label>
+    <label class="hint" id="satinBox" hidden style="display:flex;gap:8px;align-items:flex-start;margin-top:10px;color:var(--ink)">
+      <input type="checkbox" id="satin" style="margin-top:2px">
+      <span><b>Stitch narrow strokes as satin</b>: parts of a steady 1–7 mm width (script letters, swashes,
+        bars) become satin columns, smooth and shiny like pro digitizing. Usually more stitches and a few more
+        jumps to trim than fills.</span></label>
     <details class="stitch" id="stitchBox" hidden>
       <summary>Overlap &amp; pull compensation</summary>
       <div class="slider"><label for="overlap">Color overlap</label><output id="overlapOut"></output>
@@ -272,7 +277,7 @@ const state = {
   file: null, session: null, fabric: "#ffffff", prevFabric: null, removeBg: "auto",
   colors: [],            // {id, hex, fabric(null|bool), merged_into, was_fabric, restored_from}
   order: null,           // null = suggested order
-  outlines: new Set(), border: false, thinLines: true,
+  outlines: new Set(), border: false, thinLines: true, satin: false,
   plan: null, result: null, resultKey: null, tab: "live",
   labelData: null,       // ImageData of the label map
   machine: { format: "pes", hoop: "4x4", hoopW: 100, hoopH: 100, speed: 400 },
@@ -301,6 +306,7 @@ function planRequest() {
     colors: state.colors.map(c => ({ id: c.id, hex: c.hex, fabric: c.fabric, merged_into: c.merged_into,
                                      was_fabric: c.was_fabric, restored_from: c.restored_from })),
     order: state.order, outlines: [...state.outlines], border: state.border, thin_lines: state.thinLines,
+    satin: state.satin,
     hoop_w: state.machine.hoopW, hoop_h: state.machine.hoopH, format: state.machine.format,
     speed_spm: state.machine.speed, overlap_mm: state.stitch.overlap, pull_comp_mm: state.stitch.pull,
     fabric_type: state.fabricType,
@@ -455,6 +461,7 @@ function renderThreads() {
   $("paletteEmpty").hidden = !!p;
   $("paletteHint").hidden = !p;
   $("thinBox").hidden = !p;
+  $("satinBox").hidden = !p;
   $("stitchBox").hidden = !p;
   if (!p) { ul.innerHTML = ""; return; }
   $("orderMode").textContent = p.order_source === "user" ? "custom order" : "suggested order";
@@ -507,6 +514,7 @@ $("extras").addEventListener("click", (e) => {
 });
 $("resetOrder").addEventListener("click", () => { state.order = null; refreshPlan(); });
 $("thinLines").addEventListener("change", (e) => { state.thinLines = e.target.checked; refreshPlan(); });
+$("satin").addEventListener("change", (e) => { state.satin = e.target.checked; refreshPlan(); });
 
 const ul = $("threads");
 ul.addEventListener("click", (e) => {
@@ -704,7 +712,8 @@ function renderResult() {
     <span>Size</span><b>${r.width_mm} × ${r.height_mm} mm</b>
     <span>Fabric</span><b><span class="sw" style="display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid #0003;background:${s.fabric_hex};vertical-align:-1px"></span> ${esc(s.fabric_name)} ${s.fabric_hex}</b>
     <span>Bobbin</span><b>${esc(s.bobbin_name)}</b>
-    <span>Layers</span><b>${r.layers.map(l => `${l.shapes - l.lines} fill${l.shapes - l.lines === 1 ? "" : "s"}${l.lines ? ` + ${l.lines} line${l.lines === 1 ? "" : "s"}` : ""}`).join(" · ") || "none"}</b>`;
+    <span>Layers</span><b>${r.layers.map(l => { const f = l.shapes - l.lines - l.satins;
+      return `${f} fill${f === 1 ? "" : "s"}${l.satins ? ` + ${l.satins} satin${l.satins === 1 ? "" : "s"}` : ""}${l.lines ? ` + ${l.lines} line${l.lines === 1 ? "" : "s"}` : ""}`; }).join(" · ") || "none"}</b>`;
   $("threadTable").innerHTML = s.threads.map(t => `
     <tr class="${t.order ? "" : "unstitched"}"><td>${t.order ?? ""}</td>
     <td><span class="sw" style="background:${t.hex}"></span>${esc(t.name)}</td>

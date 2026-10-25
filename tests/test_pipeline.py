@@ -1,3 +1,4 @@
+import math
 import re
 import xml.etree.ElementTree as ET
 
@@ -6,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app import app
 from embroidery import pipeline
-from tests.fixtures import flat_logo_png, messy_traced_svg, ringed_badge_png, thin_outline_png
+from tests.fixtures import flat_logo_png, messy_traced_svg, ringed_badge_png, script_stroke_png, thin_outline_png
 
 SVG = "{http://www.w3.org/2000/svg}"
 INK = "{http://www.inkscape.org/namespaces/inkscape}"
@@ -334,3 +335,42 @@ def test_thin_outline_becomes_running_stitch(client):
     root, layers = check_svg(off["svg"], 99, 99)
     assert not any(p.get(f"{STITCH}stroke_method") for p in root.iter(f"{SVG}path"))
     assert any(w["code"] == "narrow_stitch" and "Black" in w["message"] for w in off["warnings"])
+
+
+def test_satin_mode_turns_strokes_into_satin_columns(client):
+    s = analyze(client, script_stroke_png(), "script.png")
+    off = client.post("/api/generate", json=request(s)).json()
+    assert "satin_column" not in off["svg"] and off["layers"][0]["satins"] == 0
+    on = client.post("/api/generate", json={**request(s), "satin": True}).json()
+    layer = on["layers"][0]
+    assert layer["satins"] >= 1 and layer["shapes"] - layer["satins"] - layer["lines"] >= 1   # the disc stays a fill
+    root, _ = layers_of(on["svg"])
+    satins = [p for p in root.iter(f"{SVG}path") if p.get(f"{STITCH}satin_column") == "true"]
+    assert len(satins) == layer["satins"]
+    for p in satins:   # two rails with paired nodes, drawn as a stroke
+        rails = [r for r in p.get("d").split("M ") if r.strip()]
+        assert len(rails) == 2 and len(rails[0].split(" L ")) == len(rails[1].split(" L "))
+        assert "fill:none" in p.get("style") and p.get(f"{STITCH}zigzag_spacing_mm") == "0.4"
+    gaps = lambda r: [w["message"] for w in r["warnings"] if w["code"] == "narrow_gap"]
+    assert gaps(on) == gaps(off)                     # columns meet the rest of the shape without new gaps
+
+
+def test_satin_column_geometry():
+    import cv2
+    import numpy as np
+    from embroidery.raster import PX_PER_MM
+    from embroidery.vectorize import satin_params, split_satin
+
+    m = np.zeros((60 * PX_PER_MM, 80 * PX_PER_MM), np.uint8)
+    pts = np.array([[(10 + t * 0.6) * PX_PER_MM, (30 + 12 * np.sin(t / 6)) * PX_PER_MM] for t in range(70)], np.int32)
+    cv2.polylines(m, [pts], False, 1, 3 * PX_PER_MM)                     # a 3 mm stroke
+    cv2.circle(m, (65 * PX_PER_MM, 15 * PX_PER_MM), 8 * PX_PER_MM, 1, -1)   # a 16 mm blob
+    cv2.rectangle(m, (5 * PX_PER_MM, 50 * PX_PER_MM), (75 * PX_PER_MM, 59 * PX_PER_MM), 1, -1)  # 9 mm bar: too wide
+    rest, sats = split_satin(m.astype(bool))
+    assert len(sats) == 1 and abs(sats[0].width_mm - 3) < 0.4
+    assert len(sats[0].rail1) == len(sats[0].rail2)
+    left = rest.sum() / PX_PER_MM ** 2
+    assert abs(left - (math.pi * 64 + 70 * 9)) < 40                      # blob + bar stay fills, stroke is gone
+    towel = satin_params(3.0, 0.3, 0.22, underlay=True)
+    assert towel["zigzag_spacing_mm"] == "0.35" and towel["zigzag_underlay"] == "true"
+    assert satin_params(1.5)["contour_underlay"] == "false"

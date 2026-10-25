@@ -5,7 +5,7 @@ import pyembroidery as pe
 import pytest
 
 from embroidery import export, pipeline
-from tests.fixtures import flat_logo_png, thin_outline_png
+from tests.fixtures import flat_logo_png, script_stroke_png, thin_outline_png
 
 
 def _pes(pattern: pe.EmbPattern) -> bytes:
@@ -113,3 +113,15 @@ def test_inkstitch_exports_other_formats_on_bigger_hoop(fmt):
                             hoop=(130, 180))
     assert r["ok"], r["problems"]
     assert 115 < max(r["extent_mm"]) <= 121
+
+
+@pytest.mark.inkstitch
+@pytest.mark.skipif(not export.find_inkstitch(), reason="Ink/Stitch not installed")
+def test_inkstitch_exports_satin_columns():
+    s = pipeline.new_session(script_stroke_png(), "script.png", 99, 99, None)
+    g = pipeline.generate(s, {"fabric_hex": "#ffffff", "satin": True,
+                              "colors": [{"id": i, "hex": h} for i, h in enumerate(s.hexes)]})
+    assert any(l["satins"] for l in g["layers"])
+    r = export.analyze_file(export.export_file(g["svg"], "pes"), "pes", g["machine"]["thread_blocks"])
+    assert r["ok"], r["problems"]
+    assert r["longest_stitch_mm"] <= export.MAX_STITCH_MM

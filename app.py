@@ -42,6 +42,7 @@ class PlanIn(BaseModel):
     outlines: list[int] = []
     border: bool = False
     thin_lines: bool = True                 # stitch < 1 mm features as triple running-stitch outlines
+    satin: bool = False                     # stitch steady 1–7 mm strokes as satin columns
     hoop_w: float = machines.HOOPS[machines.DEFAULT_HOOP]["w"]
     hoop_h: float = machines.HOOPS[machines.DEFAULT_HOOP]["h"]
     format: str = machines.DEFAULT_FORMAT

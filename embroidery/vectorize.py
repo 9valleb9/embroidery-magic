@@ -253,3 +253,203 @@ def _trace(skel: np.ndarray) -> list[list[tuple[int, int]]]:
             if (start, q) not in seen:
                 chains.append(walk(start, q))
     return chains
+
+
+# ---------------------------------------------------------------- satin mode
+# Strokes of a steady width (script letters, swashes, bars) are stitched as satin
+# columns: two rails along the stroke's edges, one zig-zag across. Each column is
+# built from a stretch of the color's skeleton; what the satins don't cover (wide
+# areas, junction blobs) stays a fill. Rails get equal point counts, so Ink/Stitch
+# pairs them node by node (no rungs needed).
+
+SATIN_MIN_MM = 1.0
+SATIN_MAX_MM = 7.0         # wider zig-zags snag and get loose on home machines
+SATIN_MIN_LEN = 1.5        # a column must be at least this many widths long (else it's a blob)
+SATIN_STEP_MM = 0.5        # rail node spacing
+SATIN_MAX_TURN_DEG = 50    # skeleton pieces meeting straighter than this are one column
+SATIN_MAX_SPILL = 0.08     # share of a column allowed outside the shape
+SATIN_SPACING_MM = 0.4     # Ink/Stitch's default zig-zag spacing
+
+
+class Satin:
+    """A satin column in mm: rails as equal-length point lists, its outline, median width."""
+
+    def __init__(self, rail1: list, rail2: list, width_mm: float):
+        self.rail1, self.rail2, self.width_mm = rail1, rail2, width_mm
+        self.poly = max(polygons(Polygon(rail1 + rail2[::-1]).buffer(0)), key=lambda p: p.area)
+
+    def translated(self, dx: float, dy: float) -> "Satin":
+        return Satin([(x + dx, y + dy) for x, y in self.rail1], [(x + dx, y + dy) for x, y in self.rail2],
+                     self.width_mm)
+
+
+def satin_params(width_mm: float, pull_comp_mm: float = 0.0, row_spacing_mm: float | None = None,
+                 underlay: bool = False, light_on_dark: bool = False) -> dict[str, str]:
+    """Zig-zag spacing follows the fabric's fill density (0.25 mm rows = the 0.4 mm default)."""
+    spacing = SATIN_SPACING_MM * (row_spacing_mm or 0.25) / 0.25
+    if light_on_dark:
+        spacing, underlay = min(spacing, SATIN_SPACING_MM), True
+    params = {"satin_column": "true", "zigzag_spacing_mm": f"{spacing:.2f}".rstrip("0").rstrip("."),
+              "center_walk_underlay": "true", "contour_underlay": "true" if width_mm >= 2 else "false",
+              "zigzag_underlay": "true" if underlay and width_mm >= 3 else "false"}
+    if pull_comp_mm > 0:
+        params["pull_compensation_mm"] = f"{pull_comp_mm:g}"
+    return params
+
+
+def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
+    """Split a color mask into (what's left to fill, satin columns)."""
+    from collections import Counter
+    from skimage.morphology import skeletonize
+
+    m8 = mask.astype(np.uint8)
+    if not m8.any():
+        return mask, []
+    dist = cv2.distanceTransform(m8, cv2.DIST_L2, 5)
+    chains = [c for c in _trace(skeletonize(mask)) if len(c) >= 2]
+    ends = Counter(p for c in chains for p in (c[0], c[-1]))
+
+    def spur(c):   # a short twig off a corner of a wide area, left by the skeleton
+        tip = ends[c[0]] == 1 or ends[c[-1]] == 1
+        return tip and c[0] != c[-1] and len(c) < 1.5 * float(max(dist[y, x] for y, x in c))
+    chains = [c for c in chains if not spur(c)]
+
+    lo, hi = SATIN_MIN_MM * PX_PER_MM, SATIN_MAX_MM * PX_PER_MM
+    allowed = cv2.dilate(m8, np.ones((3, 3), np.uint8)).astype(bool)
+    covered = np.zeros_like(m8)
+    out = []
+    for run in _join_smooth(chains):
+        w = 2 * np.array([dist[y, x] for y, x in run])
+        w = np.array([np.median(w[max(0, i - 4):i + 5]) for i in range(len(w))])
+        ok = (w >= lo) & (w <= hi)
+        i = 0
+        while i < len(run):                    # each in-range stretch is a candidate column
+            if not ok[i]:
+                i += 1
+                continue
+            j = i
+            while j < len(run) and ok[j]:
+                j += 1
+            seg, ws, start = run[i:j], w[i:j], i
+            i = j
+            if len(seg) < SATIN_MIN_LEN * float(np.median(ws)):
+                continue
+            tips = (start == 0 and ends[run[0]] == 1, j == len(run) and ends[run[-1]] == 1)
+            sat = _column(seg, ws, tips)
+            if sat is None:
+                continue
+            pm = np.zeros_like(m8)
+            _fill_mm(pm, sat.poly)
+            area = int(pm.sum())
+            if not area or (pm.astype(bool) & ~allowed).sum() > SATIN_MAX_SPILL * area:
+                continue
+            covered |= pm
+            out.append(sat)
+    if not out:
+        return mask, []
+    # What's left is filled. It reaches 0.3 mm under the columns so junctions don't leave
+    # fabric showing, then slivers left along the columns' edges are dropped.
+    disk = lambda mm: cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, round(mm * PX_PER_MM) | 1),) * 2)
+    rest = mask & ~cv2.erode(covered, disk(0.3)).astype(bool)
+    # A leftover piece lying wholly along a column, and too small or too thin to fill, is a
+    # sliver of its edge: drop it. Anything reaching further (serifs, hairlines) stays whole.
+    opened = cv2.morphologyEx(rest.astype(np.uint8), cv2.MORPH_OPEN, disk(0.6)).astype(bool)
+    near = cv2.dilate(covered, disk(1.0)).astype(bool)
+    n, cc = cv2.connectedComponents(rest.astype(np.uint8), connectivity=8)
+    idx = cc.ravel()
+    area = np.bincount(idx, minlength=n)
+    away = np.bincount(idx, weights=(rest & ~near).ravel(), minlength=n)
+    solid = np.bincount(idx, weights=opened.ravel(), minlength=n)
+    drop = (away == 0) & ((area < PX_PER_MM ** 2) | (solid == 0))
+    drop[0] = True
+    return rest & ~drop[cc], out
+
+
+def _fill_mm(mask: np.ndarray, poly: Polygon) -> None:
+    rings = [poly.exterior, *poly.interiors]
+    pts = [np.round((np.asarray(r.coords) * PX_PER_MM - 0.5) * 8).astype(np.int32) for r in rings]
+    cv2.fillPoly(mask, pts, 1, lineType=cv2.LINE_8, shift=3)
+
+
+def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, False)) -> Satin | None:
+    """Skeleton pixels + stroke widths (px) -> a satin column with paired rail nodes.
+    tips: which ends are a stroke's free end (tapered) rather than a junction (run in full)."""
+    xy = np.array([((x + 0.5) / PX_PER_MM, (y + 0.5) / PX_PER_MM) for y, x in seg])
+    k = 7                                      # smooth the pixel staircase before taking tangents
+    if len(xy) > k:
+        pad = np.pad(xy, ((k // 2, k // 2), (0, 0)), mode="edge")
+        xy = np.stack([np.convolve(pad[:, a], np.ones(k) / k, mode="valid") for a in (0, 1)], axis=1)
+    s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(xy, axis=0).T))])
+    if s[-1] < 1.0:
+        return None
+    n = max(3, int(round(s[-1] / SATIN_STEP_MM)) + 1)
+    t = np.linspace(0, s[-1], n)
+    c = np.stack([np.interp(t, s, xy[:, 0]), np.interp(t, s, xy[:, 1])], axis=1)
+    r = np.interp(t, s, widths) / PX_PER_MM / 2 + 0.5 / PX_PER_MM   # a hair of overlap with the edge
+    tan = np.gradient(c, axis=0)
+    tan /= np.maximum(np.hypot(*tan.T), 1e-9)[:, None]
+    # reach past the skeleton's ends, which stop about a half-width short of the stroke's
+    # end (taper there) or of the junction's middle (run into it at full width)
+    reach = [0.8 if t else 1.0 for t in tips]
+    c = np.vstack([c[0] - tan[0] * r[0] * reach[0], c, c[-1] + tan[-1] * r[-1] * reach[1]])
+    tan = np.vstack([tan[0], tan, tan[-1]])
+    r = np.concatenate([[r[0] * (0.6 if tips[0] else 1.0)], r, [r[-1] * (0.6 if tips[1] else 1.0)]])
+    nrm = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
+    left, right = c + nrm * r[:, None], c - nrm * r[:, None]
+    keep = [0]
+    for i in range(1, len(c)):                # drop node pairs that fold back on a tight inner curve
+        a = keep[-1]
+        if np.dot(left[i] - left[a], tan[i]) > 0 and np.dot(right[i] - right[a], tan[i]) > 0:
+            keep.append(i)
+    if len(keep) < 3:
+        return None
+    rail1 = [tuple(map(float, p)) for p in left[keep]]
+    rail2 = [tuple(map(float, p)) for p in right[keep]]
+    try:
+        return Satin(rail1, rail2, float(np.median(widths)) / PX_PER_MM)
+    except ValueError:                         # degenerate outline
+        return None
+
+
+def _join_smooth(chains: list[list]) -> list[list]:
+    """Join skeleton pieces that continue each other straight through a junction (turn
+    under SATIN_MAX_TURN_DEG), so a stroke is one column; sharp corners start a new one."""
+    from collections import defaultdict
+
+    def heading(c, at_start):                 # direction leaving the chain's end, into the junction
+        pts = c if at_start else c[::-1]
+        a, b = np.array(pts[min(len(pts) - 1, 10)]), np.array(pts[0])
+        v = (b - a).astype(float)
+        return v / max(np.hypot(*v), 1e-9)
+
+    ends = defaultdict(list)
+    for i, c in enumerate(chains):
+        ends[c[0]].append(i)
+        ends[c[-1]].append(i)
+    used = [False] * len(chains)
+    runs = []
+    cos_max = math.cos(math.radians(SATIN_MAX_TURN_DEG))
+    for i in sorted(range(len(chains)), key=lambda i: -len(chains[i])):
+        if used[i]:
+            continue
+        used[i] = True
+        run = list(chains[i])
+        for _ in range(2):
+            while run[0] != run[-1]:
+                into = heading(run, False)    # arriving at run[-1]
+                best, best_cos = None, cos_max
+                for j in ends[run[-1]]:
+                    if used[j]:
+                        continue
+                    c = chains[j] if chains[j][0] == run[-1] else chains[j][::-1]
+                    out = -heading(c, True)   # leaving run[-1] along c
+                    cs = float(np.dot(into, out))
+                    if cs > best_cos:
+                        best, best_cos = (j, c), cs
+                if best is None:
+                    break
+                used[best[0]] = True
+                run.extend(best[1][1:])
+            run.reverse()
+        runs.append(run)
+    return runs

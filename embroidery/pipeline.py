@@ -24,7 +24,8 @@ from . import machines as M
 from .export import EST_STITCHES_PER_MM2, STITCH_WARN
 from .raster import PX_PER_MM, rasterize
 from .svg_out import write_svg
-from .vectorize import LINE_PARAMS, band, mask_to_polygons, polygons, split_thin, stitch_params
+from .vectorize import (LINE_PARAMS, Satin, band, mask_to_polygons, polygons, satin_params, split_satin,
+                        split_thin, stitch_params)
 
 OUTLINE_MM = 1.0
 BORDER_MM = 1.0
@@ -41,6 +42,7 @@ class Geometry:
     labels: np.ndarray                         # merged label map
     shapes: dict[int, list[Polygon]]
     lines: dict[int, list[LineString]]         # outline mode: thin features as centerlines
+    satins: dict[int, list[Satin]]             # satin mode: steady 1–7 mm strokes as satin columns
     area_mm2: dict[int, float]
     adjacency: dict[int, dict[int, int]]       # id -> neighbor id -> shared edge length (px)
     frame_label: int | None                    # label covering most of the image frame (>= 50%)
@@ -59,10 +61,10 @@ class Session:
     background: dict | None = None             # {hex, share, removed} when an edge background was found
     _geom: dict = field(default_factory=dict)
 
-    def geometry(self, mapping: dict[int, int], thin_lines: bool = True) -> Geometry:
-        key = (tuple(sorted(mapping.items())), thin_lines)
+    def geometry(self, mapping: dict[int, int], thin_lines: bool = True, satin: bool = False) -> Geometry:
+        key = (tuple(sorted(mapping.items())), thin_lines, satin)
         if key not in self._geom:
-            self._geom[key] = _build_geometry(self.labels, mapping, thin_lines)
+            self._geom[key] = _build_geometry(self.labels, mapping, thin_lines, satin)
         return self._geom[key]
 
 
@@ -183,20 +185,25 @@ def _label_png(labels: np.ndarray) -> str:
 
 # ---------------------------------------------------------------- geometry
 
-def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines: bool) -> Geometry:
+def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines: bool,
+                    satin: bool = False) -> Geometry:
     lut = np.arange(256, dtype=np.uint8)
     for src, dst in mapping.items():
         lut[src] = dst
     labels = lut[base_labels]
 
     ids = [int(i) for i in np.unique(labels) if i != TRANSPARENT]
-    shapes, lines = {}, {}
+    shapes, lines, satins = {}, {}, {}
     for i in ids:
         mask = labels == i
         if thin_lines:
             mask, lines[i] = split_thin(mask)
         else:
             lines[i] = []
+        if satin:
+            mask, satins[i] = split_satin(mask)
+        else:
+            satins[i] = []
         shapes[i] = mask_to_polygons(mask)
     counts = np.bincount(labels.ravel(), minlength=256)
     area = {i: float(counts[i]) / PX_PER_MM ** 2 for i in ids}
@@ -215,7 +222,7 @@ def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines
     vals, cnts = np.unique(frame, return_counts=True)
     top = int(cnts.argmax())
     frame_label = int(vals[top]) if cnts[top] >= 0.5 * len(frame) else None
-    return Geometry(labels, shapes, lines, area, adjacency, frame_label)
+    return Geometry(labels, shapes, lines, satins, area, adjacency, frame_label)
 
 
 def _resolve_merges(colors: list[dict]) -> dict[int, int]:
@@ -241,7 +248,7 @@ def build_plan(s: Session, req: dict) -> dict:
     prev_fabric = req.get("prev_fabric_hex")
     by_id = {c["id"]: c for c in req["colors"]}
     mapping = _resolve_merges(req["colors"])
-    geom = s.geometry(mapping, bool(req.get("thin_lines", True)))
+    geom = s.geometry(mapping, bool(req.get("thin_lines", True)), bool(req.get("satin", False)))
     eff_ids = [c["id"] for c in req["colors"] if c["id"] not in mapping and c["id"] in geom.shapes]
     outlines = set(req.get("outlines") or [])
     warnings: list[dict] = []
@@ -409,6 +416,7 @@ def generate(s: Session, req: dict) -> dict:
     overlap = float(req.get("overlap_mm", DEFAULT_OVERLAP_MM) or 0)
     stitched = [cid for cid in plan["order"] if not decided[cid]["fabric"]]
     grow = _overlap(geom, stitched, overlap)
+    satin_rows = fab["row_spacing_mm"]
 
     layers = []
     for cid in plan["order"]:
@@ -418,10 +426,12 @@ def generate(s: Session, req: dict) -> dict:
         shapes = [(g, prm) for p in geom.shapes[cid]
                   for prm in [stitch_params(p, d["light_on_dark"], pull, fab["row_spacing_mm"], fab["underlay"])]
                   for g in grow(p)]
+        shapes += [(sat.poly, {**satin_params(sat.width_mm, pull, satin_rows, fab["underlay"], d["light_on_dark"]),
+                               "_satin": sat}) for sat in geom.satins[cid]]
         shapes += [(ln, dict(LINE_PARAMS)) for ln in geom.lines[cid]]
         layers.append({"label": d["layer_name"], "hex": d["hex"], "shapes": shapes, "color_id": cid, "kind": "fill"})
         if cid in outlines:
-            ring = band(geom.shapes[cid], OUTLINE_MM)
+            ring = band(geom.shapes[cid] + [sat.poly for sat in geom.satins[cid]], OUTLINE_MM)
             layers.append({"label": f"{bw_name} outline ({d['name']})", "hex": bw_hex, "kind": "outline",
                            "shapes": [(p, {"fill_method": "contour_fill"}) for p in ring]})
     if req.get("border"):
@@ -429,6 +439,7 @@ def generate(s: Session, req: dict) -> dict:
         bg = geom.frame_label
         skip = {bg} if bg is not None and bg in fabric_ids else set()
         sil = unary_union([p for i, ps in geom.shapes.items() if i not in skip for p in ps]
+                          + [st.poly for i, ss in geom.satins.items() if i not in skip for st in ss]
                           + [ln.buffer(0.4) for i, ls in geom.lines.items() if i not in skip for ln in ls])
         ring = band(polygons(sil), BORDER_MM, outer_only=True)
         layers.append({"label": f"{bw_name} border", "hex": bw_hex, "kind": "border",
@@ -443,7 +454,9 @@ def generate(s: Session, req: dict) -> dict:
 
     # The SVG canvas is the hoop's stitch field; the design sits centered on it.
     dx, dy = (hoop_w - s.width_mm) / 2, (hoop_h - s.height_mm) / 2
-    placed = [{**l, "shapes": [(translate(p, dx, dy), prm) for p, prm in l["shapes"]]} for l in layers]
+    placed = [{**l, "shapes": [(translate(p, dx, dy),
+                                {**prm, "_satin": prm["_satin"].translated(dx, dy)} if "_satin" in prm else prm)
+                               for p, prm in l["shapes"]]} for l in layers]
     meta = {**plan["summary"], "fabric_type": fab["label"], "stabilizer": fab["stabilizer"],
             "needle": fab["needle"]}
     svg = write_svg(hoop_w, hoop_h, placed, meta)
@@ -461,7 +474,8 @@ def generate(s: Session, req: dict) -> dict:
     plan["preview_marked_png"] = preview_marked
     plan["layers"] = [{"label": l["label"], "hex": l["hex"], "shapes": len(l["shapes"]),
                        "contour": sum(p.get("fill_method") == "contour_fill" for _, p in l["shapes"]),
-                       "lines": sum("stroke_method" in p for _, p in l["shapes"])}
+                       "lines": sum("stroke_method" in p for _, p in l["shapes"]),
+                       "satins": sum("_satin" in p for _, p in l["shapes"])}
                       for l in layers]
     plan["width_mm"], plan["height_mm"] = s.width_mm, s.height_mm
     plan["elapsed_s"] = round(time.time() - t0, 2)
@@ -474,7 +488,8 @@ def _overlap(geom: Geometry, stitched: list[int], mm: float):
     slivers of fabric between them. It never grows outward past the design's edge."""
     if mm <= 0:
         return lambda p: [p]
-    union = unary_union([p for cid in stitched for p in geom.shapes[cid]])
+    union = unary_union([p for cid in stitched for p in geom.shapes[cid]]
+                        + [sat.poly for cid in stitched for sat in geom.satins[cid]])
     allowed = union.buffer(mm, join_style="round").buffer(-mm, join_style="round")   # closing
 
     def grow(p: Polygon) -> list[Polygon]:
@@ -554,6 +569,10 @@ def _fabric_advice(s: Session, fab: dict, pull: float, layers: list[dict], machi
         bigger = (f" A bigger design holds more of them as fills: this hoop allows up to "
                   f"{s.width_mm * scale:.0f} × {s.height_mm * scale:.0f} mm.") if scale > 1.05 else ""
         notes.append(f"{what}.{bigger}")
+    n_satins = sum("_satin" in p for l in layers for _, p in l["shapes"])
+    if n_satins:
+        notes.append(f"{n_satins} stroke{'s' if n_satins != 1 else ''} stitch as satin. Satin can snag on "
+                     "loopy or textured fabric, so use topping there.")
     if fab.get("max_height_mm") and min(s.width_mm, s.height_mm) > fab["max_height_mm"]:
         geo_warnings.append({"level": "warn", "code": "fabric_height",
                              "message": f"The design is {min(s.width_mm, s.height_mm):g} mm tall. A folded "

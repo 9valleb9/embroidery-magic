@@ -92,3 +92,17 @@ def thin_outline_png(size: int = 800) -> bytes:
     buf = io.BytesIO()
     img.save(buf, "PNG")
     return buf.getvalue()
+
+
+def script_stroke_png(size: int = 800) -> bytes:
+    """A ~3 mm wide navy S-curve stroke (at 99 mm wide) and a solid 20 mm disc, on white."""
+    s = size * 4
+    img = Image.new("RGB", (s, s // 2), "white")
+    d = ImageDraw.Draw(img)
+    pts = [(s * (0.05 + 0.6 * t / 100), s * (0.25 + 0.15 * math.sin(t / 100 * 2 * math.pi))) for t in range(101)]
+    d.line(pts, fill="#1f2a44", width=int(s * 0.03), joint="curve")
+    d.ellipse([s * 0.72, s * 0.15, s * 0.92, s * 0.35], fill="#1f2a44")
+    img = img.resize((size, size // 2), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()

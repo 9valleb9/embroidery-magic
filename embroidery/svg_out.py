@@ -63,8 +63,13 @@ def write_svg(width_mm: float, height_mm: float, layers: list[dict], meta: dict)
         out.append(f'  <g inkscape:groupmode="layer" inkscape:label={quoteattr(layer["label"])} id="layer{li}">')
         for geom, params in layer["shapes"]:
             n += 1
-            attrs = " ".join(f'inkstitch:{k}={quoteattr(v)}' for k, v in params.items())
-            if geom.geom_type == "LineString":   # outline mode: running-stitch centerline
+            attrs = " ".join(f'inkstitch:{k}={quoteattr(v)}' for k, v in params.items() if not k.startswith("_"))
+            if "_satin" in params:               # satin column: two rails, nodes paired one to one
+                sat = params["_satin"]
+                d = " ".join("M " + " L ".join(f"{_num(x)} {_num(y)}" for x, y in rail) for rail in (sat.rail1, sat.rail2))
+                out.append(f'    <path id="path{n}" style="fill:none;stroke:{layer["hex"]};stroke-width:0.3" '
+                           f'd="{d}" {attrs}/>')
+            elif geom.geom_type == "LineString":   # outline mode: running-stitch centerline
                 d = "M " + " L ".join(f"{_num(x)} {_num(y)}" for x, y in geom.coords)
                 out.append(f'    <path id="path{n}" style="fill:none;stroke:{layer["hex"]};stroke-width:0.3" '
                            f'd="{d}" {attrs}/>')

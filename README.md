@@ -15,7 +15,7 @@ Made for home single-needle machines, where the auto-digitizers get the small st
 - **Fabric-aware.** Pick the fabric type (cotton, knit, fleece, beanie, performance polyester, towel, leather…) and the stitch settings follow, with the stabilizer and needle to use. Colors that match the fabric aren't stitched. Low-contrast threads get flagged, with a one-click swap or outline. White-on-dark gets underlay so it doesn't sink in. The bobbin color is suggested.
 - **Fewest thread changes.** Near-identical colors are merged, every color is stitched in one go, and you get the change list with the name your machine's screen will show.
 - **A trim map.** Most home machines don't cut the jumps between shapes. You get every jump you'll snip by hand, numbered on a full-hoop stitch-out preview.
-- **Problem areas before you stitch.** Gaps that will close up are marked red, slivers too thin to fill are marked orange, and thin outlines become clean triple running stitches.
+- **Problem areas before you stitch.** Gaps that will close up are marked red, slivers too thin to fill are marked orange, and thin outlines become clean triple running stitches. Script letters and swashes can stitch as satin columns.
 - **Background removal.** A solid background behind the logo is dropped, and the design is cropped to fill your size.
 
 ## Try it
@@ -79,6 +79,8 @@ Sample inputs are in `samples/`: the mountain badge above, a flat 3-color logo, 
 
 **Stitch thin lines as outlines** (thread panel, on by default): features under 1 mm wide, such as a logo's outline, can't hold a fill. Their centerline (skeleton) is stitched as a triple (bean) running stitch in the same color: `inkstitch:stroke_method="running_stitch"`, `bean_stitch_repeats="1"`, 2 mm stitches. Line pieces that meet are joined into continuous runs and stitched next to the fills they touch. Short thin bits (corner slivers under 2 mm) stay part of the fill. It usually adds a few hand trims; turn it off to compare.
 
+**Stitch narrow strokes as satin** (thread panel, off by default): parts of a shape that are a steady 1–7 mm wide, like script letters, swashes and bars, are stitched as satin columns instead of fills. Each column follows the shape's centerline (its skeleton): pieces that continue each other through a junction (turning less than 50°) form one column, and sharp corners start a new one. The column's two rails sit on the stroke's edges with their nodes paired one to one, so Ink/Stitch sews straight across the stroke. Wider areas, blobs and junction centers stay fills, reaching 0.3 mm under the columns so no fabric shows where they meet. Features under 1 mm still follow *Stitch thin lines as outlines*. Satin columns get center-walk underlay, contour underlay from 2 mm wide, and zig-zag underlay from 3 mm on fabrics that use underlay. The zig-zag spacing follows the fabric's density (0.4 mm at standard). Satin usually means more stitches and a few more hand trims than fills: on a script logo at 175 mm on cotton, about 10,700 stitches and 24 trims, against 7,100 and 15 as fills.
+
 **Overlap & pull compensation** (thread panel, three sliders, remembered between visits):
 
 - **Color overlap** (default 0.3 mm): each color reaches this far under the colors it touches, and fills fabric gaps narrower than twice this, so neighbors overlap instead of leaving slivers of fabric between them. It never grows the design's outer edge, and it shows up in the previews and the gap check.
@@ -133,7 +135,7 @@ Built around the Brother SE400 (4×4 hoop, no jump trimming). Every format is ve
 | Vectorize | `cv2.findContours(RETR_CCOMP)` keeps holes. It drops parts under 1 mm² and holes under 0.8 mm², simplifies at 0.04 mm and fixes geometry with `buffer(0)`. Each color grows by 1 px so neighbors overlap slightly instead of leaving hairline seams. |
 | Fabric | Fabric-marked colors get no layer; they stay as holes in the neighboring colors. |
 | SVG | `width/height` in mm with a mm `viewBox`, inkscape + inkstitch namespaces, stamped `inkstitch_svg_version` 4 (Ink/Stitch 3.x parameter names; without it Ink/Stitch treats the file as legacy, rewrites its parameters and asks whether to update it), one layer per thread named `1 Dark green`, `2 Light green`, … in stitch order. Every shape is `fill-rule:evenodd; stroke:none`. |
-| Stitches | **Thin shapes or rings** (area ÷ perimeter < 1.2 mm, or one hole covering more than half the outline) get `inkstitch:fill_method="contour_fill"`. **Everything else** gets `tatami_fill`, with `inkstitch:angle` taken from the minimum rotated rectangle's long axis and rounded to 5°. Shapes whose edges are mostly horizontal or vertical get 45° instead of 0°/90°. All fills get the fabric type's `row_spacing_mm`; tatami shapes also get its `fill_underlay` and the pull compensation setting. **Light thread (L\* > 70) on dark fabric (L\* < 35)** always gets `fill_underlay="true"` and rows no lighter than `row_spacing_mm="0.25"`. Everything else is left at Ink/Stitch defaults. |
+| Stitches | **Thin shapes or rings** (area ÷ perimeter < 1.2 mm, or one hole covering more than half the outline) get `inkstitch:fill_method="contour_fill"`. **Everything else** gets `tatami_fill`, with `inkstitch:angle` taken from the minimum rotated rectangle's long axis and rounded to 5°. Shapes whose edges are mostly horizontal or vertical get 45° instead of 0°/90°. All fills get the fabric type's `row_spacing_mm`; tatami shapes also get its `fill_underlay` and the pull compensation setting. With satin on, steady 1–7 mm strokes become `inkstitch:satin_column="true"` paths (two rails, equal node counts) with `zigzag_spacing_mm`, underlay and pull compensation, and the rest of the shape is filled as above. **Light thread (L\* > 70) on dark fabric (L\* < 35)** always gets `fill_underlay="true"` and rows no lighter than `row_spacing_mm="0.25"`. Everything else is left at Ink/Stitch defaults. |
 
 Angles use Ink/Stitch's convention: degrees, counter-clockwise from horizontal as seen on screen.
 
@@ -166,7 +168,7 @@ pytest                      # includes real Ink/Stitch exports when installed (a
 pytest -m "not inkstitch"   # fast run
 ```
 
-The tests check that the output SVG parses, has the right mm dimensions and `viewBox`, and that every path has an inkstitch fill setting. They also cover the flat-logo and messy-trace fixtures (a few clean shapes per color), aspect ratio, the fabric restore flow, and the low-contrast warning with its outline fix, plus the stitch-setting rules and the fabric types (density, underlay, metadata, beanie and polyester limits).
+The tests check that the output SVG parses, has the right mm dimensions and `viewBox`, and that every path has an inkstitch fill setting. They also cover the flat-logo and messy-trace fixtures (a few clean shapes per color), aspect ratio, the fabric restore flow, and the low-contrast warning with its outline fix, plus the stitch-setting rules and the fabric types (density, underlay, metadata, beanie and polyester limits), plus satin columns (rail pairing, what stays a fill, a real Ink/Stitch export).
 
 ## Layout
 
@@ -174,7 +176,7 @@ The tests check that the output SVG parses, has the right mm dimensions and `vie
 app.py                  FastAPI server + `python app.py` entry point
 embroidery/raster.py    rasterize + SVG sanitizing
 embroidery/palette.py   k-means palette, label-map cleanup, photo detection
-embroidery/vectorize.py contours -> polygons, stitch settings, outline bands
+embroidery/vectorize.py contours -> polygons, stitch settings, outline bands, satin columns
 embroidery/colors.py    Lab / ΔE2000, thread names, bobbin, contrast swaps
 embroidery/pipeline.py  sessions, fabric decisions, stitch order, generation, preview + gap checks
 embroidery/svg_out.py   Ink/Stitch SVG writer
