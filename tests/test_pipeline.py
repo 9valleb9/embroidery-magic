@@ -383,3 +383,20 @@ def test_satin_column_geometry():
     towel = satin_params(3.0, 0.3, 0.22, underlay=True)
     assert towel["zigzag_spacing_mm"] == "0.35" and towel["zigzag_underlay"] == "true"
     assert satin_params(1.5)["contour_underlay"] == "false"
+
+
+def test_satin_mode_stitches_hairlines_as_1mm_satin(client):
+    s = analyze(client, thin_outline_png(), "outline.png")        # a ~0.6 mm outline ring
+    off = client.post("/api/generate", json=request(s)).json()
+    assert sum(l["lines"] for l in off["layers"]) >= 1
+    on = client.post("/api/generate", json={**request(s), "satin": True}).json()
+    assert sum(l["lines"] for l in on["layers"]) == 0               # no loose-looking running stitch
+    root, _ = layers_of(on["svg"])
+    widths = []
+    for p in root.iter(f"{SVG}path"):
+        if p.get(f"{STITCH}satin_column") != "true":
+            continue
+        r1, r2 = [[tuple(map(float, xy.split())) for xy in r.strip().split(" L ")]
+                  for r in p.get("d").split("M ") if r.strip()]
+        widths.append(min(math.dist(a, b) for a, b in zip(r1, r2)))
+    assert widths and min(widths) >= 0.95                            # hairlines widened to 1 mm

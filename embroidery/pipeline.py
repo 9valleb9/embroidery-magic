@@ -24,8 +24,8 @@ from . import machines as M
 from .export import EST_STITCHES_PER_MM2, STITCH_WARN
 from .raster import PX_PER_MM, rasterize
 from .svg_out import write_svg
-from .vectorize import (LINE_PARAMS, Satin, band, mask_to_polygons, polygons, satin_params, split_satin,
-                        split_thin, stitch_params)
+from .vectorize import (LINE_PARAMS, Satin, band, line_satin, mask_to_polygons, polygons, satin_params,
+                        split_satin, split_thin, stitch_params)
 
 OUTLINE_MM = 1.0
 BORDER_MM = 1.0
@@ -202,6 +202,10 @@ def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines
             lines[i] = []
         if satin:
             mask, satins[i] = split_satin(mask)
+            # hairlines become 1 mm satin too, so they don't read as loose threads next to satin
+            hair = [line_satin(ln) for ln in lines[i]]
+            satins[i] += [h for h in hair if h is not None]
+            lines[i] = [ln for ln, h in zip(lines[i], hair) if h is None]
         else:
             satins[i] = []
         shapes[i] = mask_to_polygons(mask)

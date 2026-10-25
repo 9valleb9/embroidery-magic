@@ -269,6 +269,7 @@ SATIN_STEP_MM = 0.5        # rail node spacing
 SATIN_MAX_TURN_DEG = 50    # skeleton pieces meeting straighter than this are one column
 SATIN_MAX_SPILL = 0.08     # share of a column allowed outside the shape
 SATIN_SPACING_MM = 0.4     # Ink/Stitch's default zig-zag spacing
+LINE_SATIN_MM = 1.0        # in satin mode, hairlines are stitched as satin this wide
 SATIN_EDGE_MM = 0.6        # leftover strips this close to a column are part of its edge, not a fill
 
 
@@ -359,6 +360,30 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
     core = np.isin(cc, keep)
     grown = cv2.dilate(core.astype(np.uint8), disk(2 * (SATIN_EDGE_MM + 0.3))).astype(bool)
     return mask & grown, out
+
+
+def line_satin(line, width_mm: float = LINE_SATIN_MM) -> Satin | None:
+    """A thin feature's centerline -> a satin column of a steady width, so hairlines
+    match satin lettering instead of reading as a loose running-stitch thread."""
+    if line.length < SATIN_STEP_MM * 2:
+        return None
+    n = max(3, int(round(line.length / SATIN_STEP_MM)) + 1)
+    c = np.array([line.interpolate(t).coords[0] for t in np.linspace(0, line.length, n)])
+    tan = np.gradient(c, axis=0)
+    tan /= np.maximum(np.hypot(*tan.T), 1e-9)[:, None]
+    nrm = np.stack([-tan[:, 1], tan[:, 0]], axis=1) * width_mm / 2
+    left, right = c + nrm, c - nrm
+    keep = [0]
+    for i in range(1, n):                     # drop node pairs that fold back on a tight curve
+        a = keep[-1]
+        if np.dot(left[i] - left[a], tan[i]) > 0 and np.dot(right[i] - right[a], tan[i]) > 0:
+            keep.append(i)
+    if len(keep) < 3:
+        return None
+    try:
+        return Satin([tuple(map(float, p)) for p in left[keep]], [tuple(map(float, p)) for p in right[keep]], width_mm)
+    except ValueError:
+        return None
 
 
 def _fill_mm(mask: np.ndarray, poly: Polygon) -> None:
