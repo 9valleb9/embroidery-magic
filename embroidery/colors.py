@@ -35,7 +35,7 @@ DARK_FABRIC_L = 35.0    # fabric L* below this counts as "dark" for the light-on
 # called by this name in messages and metadata.
 FABRIC_PRESETS = {
     "White": "#ffffff",
-    "Black": "#141414",
+    "Black": "#000000",
     "Navy": "#1f2a44",
     "Gray": "#8a8d91",
     "Tan leather": "#b5835a",
