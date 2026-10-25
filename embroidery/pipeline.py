@@ -152,7 +152,37 @@ def session_payload(s: Session) -> dict:
         "background": s.background,
         "label_png": _label_png(s.labels),
         "warnings": s.warnings,
+        "recommend": recommend(s, _auto_merge(s.hexes, counts)),
     }
+
+
+SATIN_RECOMMEND_SHARE = 0.4   # recommend satin when this much of the design is stroke-like
+
+
+def recommend(s: Session, mapping: dict[int, int]) -> dict:
+    """Stitch options that suit this image: satin when most of it is strokes under 7 mm wide
+    (script, swashes, line art, borders), fills when it's mostly solid areas. Estimated at
+    5 px/mm with a width test (what a 7 mm disk can't fit in is stroke), not the full satin
+    layout, so it stays fast. Thin-line outlines stay on: satin mode needs them for hairlines."""
+    lut = np.arange(256, dtype=np.uint8)
+    for src, dst in mapping.items():
+        lut[src] = dst
+    labels = lut[s.labels]
+    f = 5 / PX_PER_MM
+    disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (35, 35))   # 7 mm at 5 px/mm
+    stroke = total = 0
+    for i in np.unique(labels):
+        if i == TRANSPARENT:
+            continue
+        m = cv2.resize((labels == i).astype(np.uint8) * 255, None, fx=f, fy=f, interpolation=cv2.INTER_AREA) > 127
+        wide = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_OPEN, disk).astype(bool)
+        stroke += int((m & ~wide).sum())
+        total += int(m.sum())
+    share = stroke / total if total else 0.0
+    use = share >= SATIN_RECOMMEND_SHARE
+    why = (f"About {share:.0%} of this design is strokes under 7 mm wide (lettering, swashes, borders), "
+           + ("so satin columns are recommended." if use else "so fills suit it better than satin."))
+    return {"thin_lines": True, "satin": use, "satin_share": round(share, 2), "why": why}
 
 
 def _auto_merge(hexes: list[str], counts: np.ndarray) -> dict[int, int]:

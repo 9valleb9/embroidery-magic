@@ -201,13 +201,14 @@
       Within ΔE&nbsp;8 of the fabric they're knocked out automatically.</div>
     <label class="hint" id="thinBox" hidden style="display:flex;gap:8px;align-items:flex-start;margin-top:10px;color:var(--ink)">
       <input type="checkbox" id="thinLines" checked style="margin-top:2px">
-      <span><b>Stitch thin lines as outlines</b> — features under 1 mm wide become a triple running stitch
+      <span><b>Stitch thin lines as outlines</b> <span class="tag" id="thinRec" hidden>recommended</span> — features under 1 mm wide become a triple running stitch
         (fills can't hold them). Cleaner lines, but usually a few more jumps to trim.</span></label>
     <label class="hint" id="satinBox" hidden style="display:flex;gap:8px;align-items:flex-start;margin-top:10px;color:var(--ink)">
       <input type="checkbox" id="satin" style="margin-top:2px">
-      <span><b>Stitch narrow strokes as satin</b>: parts of a steady 1–7 mm width (script letters, swashes,
+      <span><b>Stitch narrow strokes as satin</b> <span class="tag" id="satinRec" hidden>recommended</span>: parts of a steady 1–7 mm width (script letters, swashes,
         bars) become satin columns, smooth and shiny like pro digitizing. Usually more stitches and a few more
         jumps to trim than fills.</span></label>
+    <div class="hint" id="recHint" hidden></div>
     <details class="stitch" id="stitchBox" hidden>
       <summary>Overlap &amp; pull compensation</summary>
       <div class="slider"><label for="overlap">Color overlap</label><output id="overlapOut"></output>
@@ -327,6 +328,7 @@ $("file").addEventListener("change", (e) => e.target.files[0] && setFile(e.targe
 function setFile(f) {
   state.file = f;
   state.removeBg = "auto";
+  state.applyRecommend = true;   // a new image gets the stitch options that suit it
   if (!sizeOk()) return;
   const url = URL.createObjectURL(f);
   $("dropContent").innerHTML = `<img src="${url}" alt=""><strong>${esc(f.name)}</strong><br>Drop another to replace`;
@@ -374,6 +376,12 @@ async function analyze() {
     $("actualSize").textContent = `Your design: ${s.width_mm} × ${s.height_mm} mm · hoop ${state.machine.hoopW} × ${state.machine.hoopH} mm (centered)`;
     renderBackground(s.background);
     $("kHint").textContent = `Suggested: ${s.suggested_k} color${s.suggested_k === 1 ? "" : "s"}` + ($("k").value === "auto" ? "" : ` (using ${s.k})`);
+    if (state.applyRecommend && s.recommend) {
+      state.thinLines = s.recommend.thin_lines; state.satin = s.recommend.satin;
+      $("thinLines").checked = state.thinLines; $("satin").checked = state.satin;
+      state.applyRecommend = false;
+    }
+    renderRecommend();
     await loadLabels(s.label_png);
     await refreshPlan();
     $("generate").disabled = false;
@@ -515,8 +523,15 @@ $("extras").addEventListener("click", (e) => {
   refreshPlan();
 });
 $("resetOrder").addEventListener("click", () => { state.order = null; refreshPlan(); });
-$("thinLines").addEventListener("change", (e) => { state.thinLines = e.target.checked; refreshPlan(); });
-$("satin").addEventListener("change", (e) => { state.satin = e.target.checked; refreshPlan(); });
+$("thinLines").addEventListener("change", (e) => { state.thinLines = e.target.checked; renderRecommend(); refreshPlan(); });
+$("satin").addEventListener("change", (e) => { state.satin = e.target.checked; renderRecommend(); refreshPlan(); });
+function renderRecommend() {
+  const r = state.session?.recommend;
+  $("thinRec").hidden = !(r && r.thin_lines);
+  $("satinRec").hidden = !(r && r.satin);
+  $("recHint").hidden = !r;
+  if (r) $("recHint").textContent = r.why + (state.satin === r.satin ? "" : " (you changed it)");
+}
 
 const ul = $("threads");
 ul.addEventListener("click", (e) => {

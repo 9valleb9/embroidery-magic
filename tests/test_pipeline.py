@@ -400,3 +400,10 @@ def test_satin_mode_stitches_hairlines_as_1mm_satin(client):
                   for r in p.get("d").split("M ") if r.strip()]
         widths.append(min(math.dist(a, b) for a, b in zip(r1, r2)))
     assert widths and min(widths) >= 0.95                            # hairlines widened to 1 mm
+
+
+def test_recommends_satin_for_strokes_and_fills_for_solid_art(client):
+    script = analyze(client, script_stroke_png(), "script.png")["recommend"]
+    assert script["satin"] and script["thin_lines"] and "recommended" in script["why"]
+    flat = analyze(client, flat_logo_png(), "logo.png")["recommend"]
+    assert not flat["satin"] and flat["thin_lines"]
