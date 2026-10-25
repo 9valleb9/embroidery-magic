@@ -449,7 +449,7 @@ SATIN_MAX_TURN_DEG = 50    # skeleton pieces meeting straighter than this are on
 SATIN_MAX_SPILL = 0.08     # share of a column allowed outside the shape
 SATIN_SPACING_MM = 0.4     # Ink/Stitch's default zig-zag spacing
 LINE_SATIN_MM = 1.0        # in satin mode, hairlines are stitched as satin this wide
-SATIN_EDGE_MM = 0.6        # leftover strips this close to a column are part of its edge, not a fill
+SATIN_SLIVER_MM = 0.5      # leftovers narrower than this along a column are its edge, not a fill
 
 
 class Satin:
@@ -522,9 +522,10 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
          and is at least ``SATIN_MIN_LEN`` widths long becomes a ``_column``.
          A column is rejected if more than ``SATIN_MAX_SPILL`` of it falls
          outside the mask (grown by 1 px).
-      4. The fill remainder is the mask minus a ``SATIN_EDGE_MM`` margin around
-         the columns, keeping pieces of at least 0.5 mm², grown back so they
-         tuck 0.3 mm under the columns (see the comment below).
+      4. The fill remainder is what the columns don't cover, minus strips
+         narrower than ``SATIN_SLIVER_MM`` (a column's edge), keeping pieces of
+         at least 0.2 mm², grown 0.3 mm so they tuck under the columns (see the
+         comment below).
 
     Args:
         mask: HxW bool mask of one color at ``PX_PER_MM``. In pipeline.py
@@ -584,16 +585,20 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
             out.append(sat)
     if not out:
         return mask, []
-    # What's left is filled. First everything within EDGE_MM of a column is set aside: that
-    # removes the strip between a column's rails and the shape's edge, which would otherwise be
-    # stitched twice (satin, then a contour fill over its edge). Pieces that survive (serifs,
-    # junction centers, wide areas) then grow back to tuck 0.3 mm under the columns.
+    # What's left is filled, judged by width rather than by closeness to a column:
+    # - Strips between a column's rails and the shape's edge are hairline-thin (under
+    #   SATIN_SLIVER_MM). Stitching them would sew a second layer over the satin's edge,
+    #   so an opening drops them.
+    # - Anything wider is a real part of the shape (serifs, arches, junction centers, the
+    #   spot where a stroke narrows into a hairline). It stays, even right next to a
+    #   column, and grows 0.3 mm so it tucks under its neighbors instead of leaving a gap.
     disk = lambda mm: cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, round(mm * PX_PER_MM) | 1),) * 2)
-    core = mask & ~cv2.dilate(covered, disk(2 * SATIN_EDGE_MM)).astype(bool)
-    n, cc, stats, _ = cv2.connectedComponentsWithStats(core.astype(np.uint8), connectivity=8)
-    keep = np.flatnonzero(stats[1:, cv2.CC_STAT_AREA] >= 0.5 * PX_PER_MM ** 2) + 1
-    core = np.isin(cc, keep)
-    grown = cv2.dilate(core.astype(np.uint8), disk(2 * (SATIN_EDGE_MM + 0.3))).astype(bool)
+    left = (mask & ~covered.astype(bool)).astype(np.uint8)
+    solid = cv2.morphologyEx(left, cv2.MORPH_OPEN, disk(SATIN_SLIVER_MM))
+    n, cc, stats, _ = cv2.connectedComponentsWithStats(solid, connectivity=8)
+    keep = np.flatnonzero(stats[1:, cv2.CC_STAT_AREA] >= 0.2 * PX_PER_MM ** 2) + 1
+    solid = np.isin(cc, keep).astype(np.uint8)
+    grown = cv2.dilate(solid, disk(2 * 0.3)).astype(bool)
     return mask & grown, out
 
 
@@ -620,6 +625,11 @@ def line_satin(line, width_mm: float = LINE_SATIN_MM) -> Satin | None:
     c = np.array([line.interpolate(t).coords[0] for t in np.linspace(0, line.length, n)])
     tan = np.gradient(c, axis=0)
     tan /= np.maximum(np.hypot(*tan.T), 1e-9)[:, None]
+    # run 0.4 mm past both ends so the hairline overlaps the stroke it grows out of
+    # instead of meeting it edge to edge (which leaves a visible seam)
+    c = np.vstack([c[0] - tan[0] * 0.4, c, c[-1] + tan[-1] * 0.4])
+    tan = np.vstack([tan[0], tan, tan[-1]])
+    n = len(c)
     nrm = np.stack([-tan[:, 1], tan[:, 0]], axis=1) * width_mm / 2
     left, right = c + nrm, c - nrm
     keep = [0]

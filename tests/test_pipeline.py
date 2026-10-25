@@ -561,8 +561,8 @@ def test_satin_column_geometry():
     cv2.rectangle(m, (48 * PX_PER_MM, 14 * PX_PER_MM), (52 * PX_PER_MM, 26 * PX_PER_MM), 1, -1)  # end serif
     rest, sats = split_satin(m.astype(bool))
     assert sats
-    cols = np.flatnonzero(rest.any(axis=0)) / PX_PER_MM
-    assert not cols.size or cols.min() > 40                                 # any fill is at the serif end only
+    # along the bar's length (away from its square ends) nothing is left to fill
+    assert not rest[:, 15 * PX_PER_MM:40 * PX_PER_MM].any()
     towel = satin_params(3.0, 0.3, 0.22, underlay=True)
     assert towel["zigzag_spacing_mm"] == "0.35" and towel["zigzag_underlay"] == "true"
     assert satin_params(1.5)["contour_underlay"] == "false"
