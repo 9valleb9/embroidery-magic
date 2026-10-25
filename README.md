@@ -35,11 +35,13 @@ Then open <http://localhost:8765>.
 **With Python** (macOS shown, see [Requirements](#requirements) for Linux and Windows):
 
 ```bash
-brew install cairo            # needed by cairosvg for SVG input
+# cairo is needed by cairosvg for SVG input
+brew install cairo
 git clone https://github.com/9valleb9/embroidery-magic.git && cd embroidery-magic
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python app.py                 # opens http://127.0.0.1:8765
+python -m pip install -r requirements.txt
+# opens http://127.0.0.1:8765
+python app.py
 ```
 
 Next time, just `cd embroidery-magic && source .venv/bin/activate && python app.py`. After `git pull`, run `pip install -r requirements.txt` again and hard-reload the page.
