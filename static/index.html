@@ -155,13 +155,13 @@
       <span class="hint" style="flex:0;margin:0;white-space:nowrap">stitches/min</span>
     </div>
 
-    <label class="field">Final size (mm, aspect ratio kept)</label>
+    <label class="field">Design final size (mm, fits inside the hoop)</label>
     <div class="row">
       <input type="number" id="w" value="99" min="5" step="1" aria-label="Width mm">
       <span style="flex:0">×</span>
       <input type="number" id="h" value="99" min="5" step="1" aria-label="Height mm">
     </div>
-    <div class="hint" id="actualSize">The design is fitted inside this box and centered in the hoop.</div>
+    <div class="hint" id="actualSize">The design is fitted inside this box (aspect ratio kept) and centered in the hoop.</div>
 
     <div id="bgBox" hidden>
       <label class="field" style="display:flex;gap:8px;align-items:center;font-weight:600">
@@ -176,6 +176,10 @@
       <option>6</option><option>7</option><option>8</option>
     </select>
     <div class="hint" id="kHint"></div>
+
+    <label class="field" for="fabricType">Fabric type</label>
+    <select id="fabricType"></select>
+    <div class="hint" id="fabricTypeHint">Sets pull compensation, fill density and underlay for this fabric.</div>
 
     <label class="field">Fabric color</label>
     <div class="row">
@@ -203,10 +207,11 @@
         <input type="range" id="overlap" min="0" max="1" step="0.05">
         <div class="hint">Each color reaches this far under the colors it touches, and fills fabric gaps narrower
           than twice this, so neighbors don't leave slivers of fabric between them. Never grows the design's outer edge.</div></div>
-      <div class="slider"><label for="pull">Pull compensation</label><output id="pullOut"></output>
+      <div class="slider"><label for="pull">Pull compensation <span class="tag" id="pullTag"></span>
+        <button class="small" id="pullFabric" hidden>reset to fabric</button></label><output id="pullOut"></output>
         <input type="range" id="pull" min="0" max="0.5" step="0.05">
         <div class="hint">Fill rows are stretched this far past each edge, because stitches pull the fabric in.
-          Raise it on stretchy fabric (knits, fleece); 0.2–0.4 mm is typical. Applies to tatami fills.</div></div>
+          Set from the fabric type; stretchy fabric (knits, fleece) needs more. Applies to tatami fills.</div></div>
       <div class="slider"><label for="sliver">Absorb slivers under</label><output id="sliverOut"></output>
         <input type="range" id="sliver" min="0.1" max="1.5" step="0.05">
         <div class="hint">Color bands narrower than this (anti-aliased rims, hairline lines between colors) are merged
@@ -240,6 +245,9 @@
     <div id="out" hidden>
       <h3>Warnings</h3>
       <div id="warnings"></div>
+      <h3>Before you stitch</h3>
+      <div class="kv" id="fabricKv"></div>
+      <ul class="checks" id="fabricNotes"></ul>
       <h3>Summary</h3>
       <div class="kv" id="summaryKv"></div>
       <table class="summary" id="threadTable"></table>
@@ -269,6 +277,7 @@ const state = {
   labelData: null,       // ImageData of the label map
   machine: { format: "pes", hoop: "4x4", hoopW: 100, hoopH: 100, speed: 400 },
   stitch: { overlap: 0.3, pull: 0.2, sliver: 0.35 },
+  fabricType: "cotton",
 };
 const STITCH_DEFAULTS = { overlap: 0.3, pull: 0.2, sliver: 0.35 };
 
@@ -294,6 +303,7 @@ function planRequest() {
     order: state.order, outlines: [...state.outlines], border: state.border, thin_lines: state.thinLines,
     hoop_w: state.machine.hoopW, hoop_h: state.machine.hoopH, format: state.machine.format,
     speed_spm: state.machine.speed, overlap_mm: state.stitch.overlap, pull_comp_mm: state.stitch.pull,
+    fabric_type: state.fabricType,
   };
 }
 
@@ -353,7 +363,7 @@ async function analyze() {
     state.order = null; state.outlines.clear(); state.border = false;
     state.prevFabric = null; state.result = null; state.export = null;
     lockTabs([]); if (state.tab !== "live") state.tab = "live";
-    $("actualSize").textContent = `Output: ${s.width_mm} × ${s.height_mm} mm, centered in the ${state.machine.hoopW} × ${state.machine.hoopH} mm hoop`;
+    $("actualSize").textContent = `Your design: ${s.width_mm} × ${s.height_mm} mm · hoop ${state.machine.hoopW} × ${state.machine.hoopH} mm (centered)`;
     renderBackground(s.background);
     $("kHint").textContent = `Suggested: ${s.suggested_k} color${s.suggested_k === 1 ? "" : "s"}` + ($("k").value === "auto" ? "" : ` (using ${s.k})`);
     await loadLabels(s.label_png);
@@ -586,8 +596,13 @@ function drawLive() {
   const cv = $("live");
   if (!state.labelData) { cv.hidden = true; return; }
   const { width, height, data } = state.labelData;
-  cv.width = width; cv.height = height;
+  // The canvas is the hoop's stitch field (turned to match the design), with the design centered on it.
+  const s = state.session, pxmm = width / s.width_mm;
+  let [hw, hh] = [state.machine.hoopW, state.machine.hoopH];
+  if ((s.width_mm > s.height_mm) !== (hw > hh) && hw !== hh && fits(s.width_mm, s.height_mm, hh, hw)) [hw, hh] = [hh, hw];
+  cv.width = Math.max(width, Math.round(hw * pxmm)); cv.height = Math.max(height, Math.round(hh * pxmm));
   const ctx = cv.getContext("2d");
+  ctx.fillStyle = state.fabric; ctx.fillRect(0, 0, cv.width, cv.height);
   const out = ctx.createImageData(width, height);
   const fab = hexRgb(state.fabric);
   const lut = new Array(256).fill(fab);
@@ -600,7 +615,12 @@ function drawLive() {
     const rgb = lut[data[i]];
     out.data[i] = rgb[0]; out.data[i + 1] = rgb[1]; out.data[i + 2] = rgb[2]; out.data[i + 3] = 255;
   }
-  ctx.putImageData(out, 0, 0);
+  ctx.putImageData(out, Math.round((cv.width - width) / 2), Math.round((cv.height - height) / 2));
+  const lw = Math.max(2, cv.width / 300);
+  ctx.setLineDash([lw * 4, lw * 3]); ctx.lineWidth = lw;
+  ctx.strokeStyle = hexRgb(state.fabric).reduce((a, b) => a + b) > 382 ? "rgba(0,0,0,.45)" : "rgba(255,255,255,.6)";
+  ctx.strokeRect(lw / 2, lw / 2, cv.width - lw, cv.height - lw);
+  state.liveHoop = [hw, hh];
   showTab(state.tab);
 }
 
@@ -615,7 +635,8 @@ function showTab(tab) {
   if (state.result && tab !== "live") img.src = tab === "problems" ? state.result.preview_marked_png
     : tab === "stitchout" ? (state.export?.report?.preview_png || state.result.preview_png) : state.result.preview_png;
   $("stageBadge").hidden = !has;
-  $("stageBadge").textContent = tab === "live" ? "live · on " + (state.plan?.summary.fabric_name || "fabric").toLowerCase()
+  $("stageBadge").textContent = tab === "live" ? `live · on ${(state.plan?.summary.fabric_name || "fabric").toLowerCase()}`
+      + (state.session && state.liveHoop ? ` · design ${state.session.width_mm} × ${state.session.height_mm} mm in ${state.liveHoop[0]} × ${state.liveHoop[1]} mm hoop (dashed)` : "")
     : tab === "problems" ? "red = gaps < 0.6 mm · orange = < 1 mm wide"
     : tab === "stitchout" ? `from the ${state.export?.report ? "." + state.export.report.format : "machine"} file · whole hoop · red = trim by hand` : "stitched shapes";
   $("stale").hidden = !(state.result && tab !== "live" && isStale());
@@ -671,6 +692,13 @@ function renderResult() {
   const r = state.result;
   $("out").hidden = false;
   $("warnings").innerHTML = r.warnings.length ? r.warnings.map(warningHtml).join("") : `<div class="hint">No warnings.</div>`;
+  const fb = r.fabric;
+  $("fabricKv").innerHTML = `
+    <span>Fabric type</span><b>${esc(fb.label)}</b>
+    <span>Stabilizer</span><b>${esc(fb.stabilizer)}</b>
+    <span>Needle</span><b>${esc(fb.needle)}</b>
+    <span>Applied</span><b>${fb.pull_comp_mm} mm pull comp · ${esc(fb.density)} fill · underlay ${fb.underlay ? "on" : "off"}</b>`;
+  $("fabricNotes").innerHTML = fb.notes.map(n => `<li>${esc(n)}</li>`).join("");
   const s = r.summary;
   $("summaryKv").innerHTML = `
     <span>Size</span><b>${r.width_mm} × ${r.height_mm} mm</b>
@@ -696,11 +724,13 @@ const fmtLabel = () => "." + state.machine.format;
 const hoopText = (w, h) => `${w} × ${h} mm`;
 
 function saveMachine() {
-  try { localStorage.setItem("machine", JSON.stringify(state.machine)); localStorage.setItem("stitch", JSON.stringify(state.stitch)); } catch {}
+  try { localStorage.setItem("machine", JSON.stringify(state.machine)); localStorage.setItem("stitch", JSON.stringify(state.stitch));
+        localStorage.setItem("fabricType", state.fabricType); } catch {}
 }
 function loadMachine() {
   try { const m = JSON.parse(localStorage.getItem("machine") || "null"); if (m && m.format) Object.assign(state.machine, m); } catch {}
   try { const st = JSON.parse(localStorage.getItem("stitch") || "null"); if (st) Object.assign(state.stitch, st); } catch {}
+  try { state.fabricType = localStorage.getItem("fabricType") || state.fabricType; } catch {}
 }
 
 function renderStitchSliders() {
@@ -708,6 +738,10 @@ function renderStitchSliders() {
     $(k).value = state.stitch[k];
     $(k + "Out").textContent = (+state.stitch[k]).toFixed(2) + " mm";
   }
+  const f = fabricProfile();
+  const custom = f && Math.abs(state.stitch.pull - f.pull_comp_mm) > 1e-6;
+  $("pullTag").textContent = f ? (custom ? "custom" : f.label.split(" (")[0].toLowerCase()) : "";
+  $("pullFabric").hidden = !custom;
 }
 const reanalyzeSliver = debounce(() => state.file && sizeOk() && analyze(), 500);
 for (const k of ["overlap", "pull", "sliver"]) {
@@ -718,9 +752,27 @@ for (const k of ["overlap", "pull", "sliver"]) {
 }
 $("stitchReset").addEventListener("click", () => {
   const sliverChanged = state.stitch.sliver !== STITCH_DEFAULTS.sliver;
-  Object.assign(state.stitch, STITCH_DEFAULTS); saveMachine(); renderStitchSliders(); markStale();
+  Object.assign(state.stitch, STITCH_DEFAULTS, { pull: fabricProfile()?.pull_comp_mm ?? STITCH_DEFAULTS.pull });
+  saveMachine(); renderStitchSliders(); markStale();
   if (sliverChanged) reanalyzeSliver();
 });
+
+// ------------------------------------------------------------------ fabric type
+const fabricProfile = () => MACHINE.fabrics?.[state.fabricType];
+function renderFabricType() {
+  $("fabricType").innerHTML = Object.entries(MACHINE.fabrics || {}).map(([k, f]) =>
+    `<option value="${k}"${k === state.fabricType ? " selected" : ""}>${esc(f.label)}</option>`).join("");
+  const f = fabricProfile();
+  if (f) $("fabricTypeHint").textContent = `${f.stabilizer} stabilizer · ${f.needle} needle. Sets pull compensation, fill density and underlay.`;
+}
+function setFabricType(key) {
+  state.fabricType = key;
+  const f = fabricProfile();
+  if (f) state.stitch.pull = f.pull_comp_mm;     // the fabric's settings replace any manual tweak
+  saveMachine(); renderFabricType(); renderStitchSliders(); markStale();
+}
+$("fabricType").addEventListener("change", (e) => setFabricType(e.target.value));
+$("pullFabric").addEventListener("click", (e) => { e.preventDefault(); setFabricType(state.fabricType); });
 
 function renderMachinePickers() {
   const m = state.machine;
@@ -774,7 +826,8 @@ renderStitchSliders();
 fetch("/api/machine").then(r => r.json()).then(m => {
   Object.assign(MACHINE, m);
   if (!MACHINE.formats[state.machine.format]) state.machine.format = m.default_format;
-  renderMachinePickers();
+  if (!MACHINE.fabrics?.[state.fabricType]) state.fabricType = m.default_fabric;
+  renderMachinePickers(); renderFabricType(); renderStitchSliders();
   $("w").value = state.machine.hoopW - 2 * EDGE_MM; $("h").value = state.machine.hoopH - 2 * EDGE_MM;
 }).catch(() => {});
 

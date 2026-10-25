@@ -18,6 +18,7 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from . import colors as C
+from . import fabrics as F
 from .palette import MORPH_DISK_MM, TRANSPARENT, analyze, edge_connected, frame_label
 from . import machines as M
 from .export import EST_STITCHES_PER_MM2, STITCH_WARN
@@ -403,6 +404,7 @@ def generate(s: Session, req: dict) -> dict:
     bw_name, bw_hex = C.contrasting_bw(fabric)
     decided = {d["id"]: d for d in plan["colors"]}
 
+    fab = F.get(req.get("fabric_type"))
     pull = float(req.get("pull_comp_mm", DEFAULT_PULL_COMP_MM) or 0)
     overlap = float(req.get("overlap_mm", DEFAULT_OVERLAP_MM) or 0)
     stitched = [cid for cid in plan["order"] if not decided[cid]["fabric"]]
@@ -414,7 +416,8 @@ def generate(s: Session, req: dict) -> dict:
         if d["fabric"]:
             continue
         shapes = [(g, prm) for p in geom.shapes[cid]
-                  for prm in [stitch_params(p, d["light_on_dark"], pull)] for g in grow(p)]
+                  for prm in [stitch_params(p, d["light_on_dark"], pull, fab["row_spacing_mm"], fab["underlay"])]
+                  for g in grow(p)]
         shapes += [(ln, dict(LINE_PARAMS)) for ln in geom.lines[cid]]
         layers.append({"label": d["layer_name"], "hex": d["hex"], "shapes": shapes, "color_id": cid, "kind": "fill"})
         if cid in outlines:
@@ -435,12 +438,14 @@ def generate(s: Session, req: dict) -> dict:
     _order_shapes(layers, Point(s.width_mm / 2, s.height_mm / 2))
     hoop_w, hoop_h = M.oriented(s.width_mm, s.height_mm, *_hoop(req))
     speed = req.get("speed_spm") or M.DEFAULT_SPEED_SPM
-    machine = _machine_summary(layers, speed, (hoop_w, hoop_h))
+    density = F.STANDARD_ROW_SPACING_MM / (fab["row_spacing_mm"] or F.STANDARD_ROW_SPACING_MM)
+    machine = _machine_summary(layers, speed, (hoop_w, hoop_h), density)
 
     # The SVG canvas is the hoop's stitch field; the design sits centered on it.
     dx, dy = (hoop_w - s.width_mm) / 2, (hoop_h - s.height_mm) / 2
     placed = [{**l, "shapes": [(translate(p, dx, dy), prm) for p, prm in l["shapes"]]} for l in layers]
-    meta = {**plan["summary"]}
+    meta = {**plan["summary"], "fabric_type": fab["label"], "stabilizer": fab["stabilizer"],
+            "needle": fab["needle"]}
     svg = write_svg(hoop_w, hoop_h, placed, meta)
     preview, preview_marked, geo_warnings = _render_and_check(s, layers, fabric)
     if max(s.width_mm - hoop_w, s.height_mm - hoop_h) + 2 * pull > 0:
@@ -448,6 +453,7 @@ def generate(s: Session, req: dict) -> dict:
                              "message": f"With {pull:g} mm pull compensation the stitches reach past the "
                                         f"{hoop_w:g} × {hoop_h:g} mm hoop — make the design a little smaller."})
 
+    plan["fabric"] = _fabric_advice(s, fab, pull, layers, machine, geo_warnings, (hoop_w, hoop_h))
     plan["warnings"] = s.warnings + plan["warnings"] + machine.pop("warnings") + geo_warnings
     plan["machine"] = machine
     plan["svg"] = svg
@@ -533,8 +539,38 @@ def _two_opt(route: list, start) -> list:
     return [route[i] for i in best]
 
 
-def _machine_summary(layers: list[dict], speed: float, hoop: tuple[float, float]) -> dict:
-    """Single-needle view: thread changes, estimated stitches and run time."""
+def _fabric_advice(s: Session, fab: dict, pull: float, layers: list[dict], machine: dict,
+                   geo_warnings: list[dict], hoop: tuple[float, float]) -> dict:
+    """The "Before you stitch" box: what goes under and on top of the fabric, the stitch
+    settings the fabric type applied, and notes about this design on this fabric."""
+    notes = list(fab["extras"])
+    n_lines = sum("stroke_method" in p for l in layers for _, p in l["shapes"])
+    narrow = any(w["code"] == "narrow_stitch" for w in geo_warnings)
+    if n_lines or narrow:
+        mw, mh = M.max_design(*hoop)
+        scale = min(mw / s.width_mm, mh / s.height_mm)
+        what = f"{n_lines} thin feature{'s' if n_lines != 1 else ''} will stitch as outlines" if n_lines \
+            else "Some areas are under 1 mm wide"
+        bigger = (f" A bigger design holds more of them as fills: this hoop allows up to "
+                  f"{s.width_mm * scale:.0f} × {s.height_mm * scale:.0f} mm.") if scale > 1.05 else ""
+        notes.append(f"{what}.{bigger}")
+    if fab.get("max_height_mm") and min(s.width_mm, s.height_mm) > fab["max_height_mm"]:
+        geo_warnings.append({"level": "warn", "code": "fabric_height",
+                             "message": f"The design is {min(s.width_mm, s.height_mm):g} mm tall. A folded "
+                                        f"beanie cuff gives about {fab['max_height_mm']} mm, so make it smaller."})
+    if fab.get("stitch_warn") and machine["estimated_stitches"] > fab["stitch_warn"]:
+        geo_warnings.append({"level": "warn", "code": "fabric_stitches",
+                             "message": f"About {machine['estimated_stitches']:,} stitches is heavy for "
+                                        f"{fab['label'].lower()} (aim for under {fab['stitch_warn']:,}). "
+                                        "Make the design smaller or leave large areas as fabric."})
+    return {"key": fab["key"], "label": fab["label"], "stabilizer": fab["stabilizer"], "needle": fab["needle"],
+            "pull_comp_mm": pull, "density": F.density_label(fab["row_spacing_mm"]),
+            "underlay": fab["underlay"], "notes": notes}
+
+
+def _machine_summary(layers: list[dict], speed: float, hoop: tuple[float, float], density: float = 1.0) -> dict:
+    """Single-needle view: thread changes, estimated stitches and run time.
+    density: fill stitches relative to standard 0.25 mm rows (the fabric type's row spacing)."""
     blocks: list[str] = []
     for layer in layers:
         if layer["shapes"] and (not blocks or blocks[-1] != layer["hex"]):
@@ -549,7 +585,7 @@ def _machine_summary(layers: list[dict], speed: float, hoop: tuple[float, float]
         seen.add(hx)
     area = sum(g.area for l in layers for g, _ in l["shapes"])
     run = sum(g.length for l in layers for g, _ in l["shapes"] if g.geom_type == "LineString")
-    est = int(round(area * EST_STITCHES_PER_MM2 + run * 3 / 2.0, -2))   # triple run, 2 mm stitches
+    est = int(round(area * EST_STITCHES_PER_MM2 * density + run * 3 / 2.0, -2))   # triple run, 2 mm stitches
     jumps = sum(max(0, len(l["shapes"]) - 1) for l in layers)
     if est > STITCH_WARN:
         warnings.append({"level": "warn", "code": "stitch_count",

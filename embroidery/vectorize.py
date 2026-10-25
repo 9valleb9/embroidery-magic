@@ -110,18 +110,28 @@ def is_thin_or_ring(poly: Polygon) -> bool:
     return False
 
 
-def stitch_params(poly: Polygon, light_on_dark: bool = False, pull_comp_mm: float = 0.0) -> dict[str, str]:
-    if is_thin_or_ring(poly):
-        return {"fill_method": "contour_fill"}
+def stitch_params(poly: Polygon, light_on_dark: bool = False, pull_comp_mm: float = 0.0,
+                  row_spacing_mm: float | None = None, underlay: bool = False) -> dict[str, str]:
+    """row_spacing_mm / underlay come from the fabric type (None = Ink/Stitch default)."""
+    if is_thin_or_ring(poly):   # contour fill takes the fabric's density, but has no underlay
+        params = {"fill_method": "contour_fill"}
+        rs = min(row_spacing_mm or 0.25, 0.25) if light_on_dark else row_spacing_mm
+        if rs:
+            params["row_spacing_mm"] = f"{rs:g}"
+        return params
     angle = long_axis_angle(poly)
     if angle in (0, 90) and mostly_axis_aligned(poly):
         angle = 45
     params = {"fill_method": "tatami_fill", "angle": str(angle)}
     if pull_comp_mm > 0:   # rows are stretched this far past each edge (Ink/Stitch: tatami only)
         params["pull_compensation_mm"] = f"{pull_comp_mm:g}"
-    if light_on_dark:
+    if light_on_dark:      # never lighter than 0.25 mm rows, so the dark fabric doesn't show through
+        underlay = True
+        row_spacing_mm = min(row_spacing_mm or 0.25, 0.25)
+    if underlay:
         params["fill_underlay"] = "true"
-        params["row_spacing_mm"] = "0.25"
+    if row_spacing_mm:
+        params["row_spacing_mm"] = f"{row_spacing_mm:g}"
     return params
 
 

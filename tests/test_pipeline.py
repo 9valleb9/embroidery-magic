@@ -240,6 +240,8 @@ def test_stitch_params_rules():
     from embroidery.vectorize import stitch_params
 
     assert stitch_params(box(0, 0, 40, 0.8))["fill_method"] == "contour_fill"           # thin
+    assert stitch_params(box(0, 0, 40, 0.8), row_spacing_mm=0.22, underlay=True) == \
+        {"fill_method": "contour_fill", "row_spacing_mm": "0.22"}                         # density, no underlay
     ring = Point(0, 0).buffer(20).difference(Point(0, 0).buffer(17))
     assert stitch_params(ring)["fill_method"] == "contour_fill"                         # ring
     square = stitch_params(box(0, 0, 30, 20))
@@ -248,6 +250,47 @@ def test_stitch_params_rules():
     slanted = stitch_params(affinity.rotate(box(0, 0, 40, 10), 30, origin="centroid"))
     assert slanted["angle"] in ("150", "30")
     assert stitch_params(box(0, 0, 30, 20), light_on_dark=True)["row_spacing_mm"] == "0.25"
+    knit = stitch_params(box(0, 0, 30, 20), row_spacing_mm=0.3, underlay=True)
+    assert knit["row_spacing_mm"] == "0.3" and knit["fill_underlay"] == "true"
+    # light on dark never gets lighter rows than 0.25 mm, whatever the fabric asks for
+    assert stitch_params(box(0, 0, 30, 20), light_on_dark=True, row_spacing_mm=0.3)["row_spacing_mm"] == "0.25"
+    assert stitch_params(box(0, 0, 30, 20), light_on_dark=True, row_spacing_mm=0.22)["row_spacing_mm"] == "0.22"
+
+
+def test_fabric_type_sets_stitches_and_advice(client):
+    from embroidery import fabrics
+    s = analyze(client, flat_logo_png(), "logo.png")
+    cotton = client.post("/api/generate", json=request(s)).json()
+    assert cotton["fabric"]["key"] == "cotton" and cotton["fabric"]["stabilizer"] == "Tear-away"
+    root, _ = layers_of(cotton["svg"])
+    tatami = [p for p in root.iter(f"{SVG}path") if p.get(f"{STITCH}fill_method") == "tatami_fill"]
+    assert tatami and not any(p.get(f"{STITCH}fill_underlay") or p.get(f"{STITCH}row_spacing_mm") for p in tatami)
+
+    towel = client.post("/api/generate", json={**request(s), "fabric_type": "towel"}).json()
+    root, _ = layers_of(towel["svg"])
+    tatami = [p for p in root.iter(f"{SVG}path") if p.get(f"{STITCH}fill_method") == "tatami_fill"]
+    assert all(p.get(f"{STITCH}row_spacing_mm") == "0.22" and p.get(f"{STITCH}fill_underlay") == "true"
+               for p in tatami)
+    assert towel["machine"]["estimated_stitches"] > cotton["machine"]["estimated_stitches"]   # denser rows
+    assert any("topping" in n for n in towel["fabric"]["notes"])
+    design = next(root.iter("{urn:embroidery-magic}design"))
+    assert design.get("fabric-type") == fabrics.FABRICS["towel"]["label"] and design.get("stabilizer")
+
+    perf = client.post("/api/generate", json={**request(s), "fabric_type": "performance"}).json()
+    assert any(w["code"] == "fabric_stitches" for w in perf["warnings"]) == \
+        (perf["machine"]["estimated_stitches"] > 8000)
+    assert client.post("/api/generate", json={**request(s), "fabric_type": "burlap"}).status_code == 400
+
+
+def test_beanie_warns_when_too_tall(client):
+    s = analyze(client, flat_logo_png(), "logo.png", w=80, h=80)
+    r = client.post("/api/generate", json={**request(s), "fabric_type": "beanie"}).json()
+    assert r["fabric"]["key"] == "beanie"
+    assert min(r["width_mm"], r["height_mm"]) > 55
+    assert any(w["code"] == "fabric_height" for w in r["warnings"])
+    small = analyze(client, flat_logo_png(), "logo.png", w=50, h=50)
+    r = client.post("/api/generate", json={**request(small), "fabric_type": "beanie"}).json()
+    assert not any(w["code"] == "fabric_height" for w in r["warnings"])
 
 
 def test_bad_upload(client):

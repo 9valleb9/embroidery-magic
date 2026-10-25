@@ -32,7 +32,8 @@ def path_d(poly: Polygon) -> str:
 
 def write_svg(width_mm: float, height_mm: float, layers: list[dict], meta: dict) -> str:
     """layers: [{label, hex, shapes: [(Polygon | LineString, {param: value})]}] in stitch order.
-    meta: {fabric_hex, fabric_name, bobbin_name, bobbin_hex, threads: [{order, hex, name, status}]}"""
+    meta: {fabric_hex, fabric_name, bobbin_name, bobbin_hex, threads: [{order, hex, name, status}],
+    optional fabric_type, stabilizer, needle}"""
     w, h = _num(width_mm), _num(height_mm)
     ns = " ".join(f'xmlns{":" + k if k else ""}="{v}"' for k, v in NS.items())
     out = [
@@ -41,7 +42,9 @@ def write_svg(width_mm: float, height_mm: float, layers: list[dict], meta: dict)
         "  <title>Embroidery design</title>",
         "  <metadata>",
         f'    <em:design fabric={quoteattr(meta["fabric_hex"])} fabric-name={quoteattr(meta["fabric_name"])} '
-        f'bobbin={quoteattr(meta["bobbin_name"])} bobbin-hex={quoteattr(meta["bobbin_hex"])}>',
+        f'bobbin={quoteattr(meta["bobbin_name"])} bobbin-hex={quoteattr(meta["bobbin_hex"])}'
+        + "".join(f' {k.replace("_", "-")}={quoteattr(meta[k])}' for k in ("fabric_type", "stabilizer", "needle") if meta.get(k))
+        + '>',
     ]
     for t in meta["threads"]:
         order = f' order="{t["order"]}"' if t.get("order") else ""

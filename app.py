@@ -14,7 +14,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from embroidery import export, machines, pipeline
+from embroidery import export, fabrics, machines, pipeline
 
 HERE = Path(__file__).parent
 HOST = os.environ.get("HOST", "127.0.0.1")
@@ -48,6 +48,7 @@ class PlanIn(BaseModel):
     speed_spm: float = machines.DEFAULT_SPEED_SPM
     pull_comp_mm: float = pipeline.DEFAULT_PULL_COMP_MM   # Ink/Stitch pull compensation (tatami fills)
     overlap_mm: float = pipeline.DEFAULT_OVERLAP_MM       # how far each color reaches under its neighbors
+    fabric_type: str = fabrics.DEFAULT_FABRIC             # sets row spacing + underlay; the UI also loads its pull comp
 
 
 def _session(sid: str) -> pipeline.Session:
@@ -105,6 +106,8 @@ def _check_req(req: PlanIn) -> None:
         raise HTTPException(400, f"Pull compensation must be between 0 and {machines.MAX_PULL_COMP_MM:g} mm.")
     if not (0 <= req.overlap_mm <= 2):
         raise HTTPException(400, "Overlap must be between 0 and 2 mm.")
+    if req.fabric_type.lower() not in fabrics.FABRICS:
+        raise HTTPException(400, f"Unknown fabric type: {req.fabric_type}")
 
 
 @app.post("/api/plan")
@@ -128,7 +131,8 @@ def machine():
             "default_format": machines.DEFAULT_FORMAT, "hoops": machines.HOOPS,
             "default_hoop": machines.DEFAULT_HOOP, "default_speed_spm": machines.DEFAULT_SPEED_SPM,
             "stitch_warn": export.STITCH_WARN, "max_stitch_mm": export.MAX_STITCH_MM,
-            "inkstitch": bool(exe), "manual_steps": export.MANUAL_STEPS}
+            "inkstitch": bool(exe), "manual_steps": export.MANUAL_STEPS,
+            "fabrics": fabrics.FABRICS, "default_fabric": fabrics.DEFAULT_FABRIC}
 
 
 @app.post("/api/export")
