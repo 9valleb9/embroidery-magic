@@ -1,4 +1,48 @@
 <!doctype html>
+<!--
+  Embroidery Magic: the whole web UI in one file (HTML + CSS + one inline
+  script tag). No build step, no framework, no external assets. app.py serves it
+  at GET / and the logo at GET /logo.svg.
+
+  Layout: three panels in a grid (stacked on narrow screens).
+    1 Image & options  Drop zone, machine format, hoop, machine speed, design
+                       size, thread color count, background removal, fabric
+                       type and fabric color.
+    2 Threads          The detected palette as a sortable list: recolor, merge,
+                       Stitch/Fabric toggle, drag to reorder, thin-line and
+                       satin options, overlap / pull compensation / sliver
+                       sliders, and extras (outlines, border) added by fixes.
+    3 Result           Preview tabs (Live preview, Stitch result, Problem
+                       areas, Stitch-out), Generate, warnings with one-click
+                       fixes, "Before you stitch" fabric advice, summary, SVG
+                       download, and the machine-file export.
+
+  Server API (see app.py):
+    GET  /api/machine            On load: formats, hoops, fabric types and
+                                 defaults, stitch limits, whether Ink/Stitch
+                                 is installed, and manual export steps if not.
+    POST /api/analyze            multipart upload + size, hoop, color count,
+                                 remove_bg, sliver_mm. Creates a server
+                                 session; returns session_id, palette,
+                                 auto-merges, background info, a label-map PNG
+                                 (one palette index per pixel), size, warnings
+                                 and recommended stitch options.
+    POST /api/plan               JSON plan request (see planRequest()). Color
+                                 decisions only (fabric knockouts, order,
+                                 warnings, summary); cheap, called on every edit.
+    POST /api/generate           Same body. Returns the Ink/Stitch SVG, preview
+                                 PNGs (stitched and problem areas), warnings,
+                                 layers, summary, machine estimates and fabric
+                                 advice.
+    POST /api/export             Same body. Starts a background Ink/Stitch
+                                 export and returns {job_id} (501 when
+                                 Ink/Stitch isn't installed).
+    GET  /api/export/{id}        Polled every 2 s: job status and, when done,
+                                 the read-back report (checks, threads, trims,
+                                 stitch-out preview).
+    GET  /api/export/{id}/file   Downloads the finished machine file.
+  Errors come back as {detail: "..."} and are shown in the #error box.
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -6,6 +50,7 @@
 <title>Embroidery Magic</title>
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <style>
+  /* Theme tokens and base layout: header, the 3-column main grid, panels, form controls, buttons. */
   :root {
     --bg: #f4f2ee; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6a67; --line: #e2dfd8;
     --accent: #2f5d50; --accent-ink: #ffffff; --warn: #9a5b00; --warn-bg: #fff4e0;
@@ -39,6 +84,7 @@
   button.small { padding: 3px 8px; font-size: 12px; }
   a.btn { display: block; text-align: center; text-decoration: none; }
 
+  /* Panel 1: drop zone, fabric color presets and color picker. */
   #drop { border: 2px dashed #cfcac0; border-radius: var(--radius); padding: 22px 12px; text-align: center;
           color: var(--muted); cursor: pointer; transition: background .15s, border-color .15s; }
   #drop.over { background: #eef5f2; border-color: var(--accent); color: var(--accent); }
@@ -99,6 +145,7 @@
   @keyframes nudge { 0%,100% { transform: none } 25% { transform: translateX(-3px) } 75% { transform: translateX(3px) } }
   .nudge { animation: nudge .25s 2; }
 
+  /* Warnings with fix buttons, extras chips, summary tables, error text, spinner, export checks and trim table. */
   .warn { border-radius: 8px; padding: 8px 10px; margin: 6px 0; background: var(--warn-bg); color: #4a3200; font-size: 13px; }
   .warn.info { background: var(--info-bg); color: var(--info); }
   .warn .fixes { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
@@ -272,8 +319,65 @@
 </main>
 
 <script>
+/*
+ * App script. Plain JS, no modules; everything is global to this file.
+ *
+ * STATE
+ *   state.file        The uploaded File (re-sent to /api/analyze on re-analysis).
+ *   state.session     Last /api/analyze payload (session_id, palette, size,
+ *                     background, recommend, warnings, ...).
+ *   state.colors      Client-side color edits, one per palette entry: hex,
+ *                     fabric override (null = auto), merged_into, plus
+ *                     was_fabric / restored_from echoed back from the last plan
+ *                     so the server can restore knockouts on a fabric change.
+ *   state.order       Custom stitch order (palette ids) or null for suggested.
+ *   state.outlines, state.border  Extras added by warning fixes.
+ *   state.thinLines, state.satin  Stitch options (seeded from recommend).
+ *   state.fabric, state.prevFabric  Fabric color; prevFabric is sent once
+ *                     after a change, then cleared.
+ *   state.plan        Last /api/plan response (drives the thread list).
+ *   state.result      Last /api/generate response; state.resultKey is the
+ *                     requestKey() it was made from.
+ *   state.export      Machine-file export job: {status, job_id, key, report, ...}.
+ *   state.labelData   ImageData of the label map, for the live preview.
+ *   state.machine, state.stitch, state.fabricType  Machine, slider and fabric
+ *                     type settings (persisted, see below).
+ *   state.tab         Current preview tab. state.applyRecommend and
+ *                     state.liveHoop are set later, not in the literal below.
+ *   MACHINE           /api/machine response (formats, hoops, fabrics, ...).
+ *
+ * MAIN FLOWS
+ *   setFile -> analyze (POST /api/analyze, resets edits, loads the label map)
+ *     -> refreshPlan (POST /api/plan) -> renderThreads, renderPlanWarnings,
+ *        drawLive (recolors the label map on the client), markStale.
+ *   Any color edit, fabric change, reorder or fix calls refreshPlan again.
+ *   Size, hoop, color count, background or sliver changes call analyze again.
+ *   Generate -> POST /api/generate -> renderResult -> renderExport, and the
+ *     Stitch result / Problem areas tabs unlock.
+ *   Export -> (generate first if stale) -> POST /api/export -> poll
+ *     GET /api/export/{id} every 2 s while running -> renderExport; when done
+ *     the Stitch-out tab unlocks and shows the read-back preview.
+ *
+ * PERSISTENCE (localStorage, see saveMachine/loadMachine)
+ *   "machine"    {format, hoop, hoopW, hoopH, speed}
+ *   "stitch"     {overlap, pull, sliver}
+ *   "fabricType" fabric type key
+ *   Nothing else (image, colors, fabric color) survives a reload.
+ *
+ * STALE RESULTS
+ *   requestKey() serializes the current plan request (ignoring the one-shot
+ *   prev_fabric_hex). generate() stores it as state.resultKey; isStale() is
+ *   true once any setting differs. markStale() then shows the "Settings
+ *   changed" overlay on the result tabs and the live color checks again, and
+ *   export regenerates before exporting.
+ */
 const PRESETS = { "White": "#ffffff", "Black": "#141414", "Navy": "#1f2a44", "Gray": "#8a8d91",
                   "Tan leather": "#b5835a", "Red": "#b3202a" };
+/**
+ * Shorthand for document.getElementById.
+ * @param {string} id
+ * @returns {HTMLElement|null}
+ */
 const $ = (id) => document.getElementById(id);
 
 const state = {
@@ -290,19 +394,61 @@ const state = {
 const STITCH_DEFAULTS = { overlap: 0.3, pull: 0.2, sliver: 0.35 };
 
 // ------------------------------------------------------------------ helpers
+/**
+ * Fetch a JSON API route and return the parsed body.
+ * Throws an Error carrying the server's `detail` message (or the status text) on a non-2xx response.
+ * @param {string} path  Route, e.g. "/api/plan".
+ * @param {RequestInit} [opts]  fetch options.
+ * @returns {Promise<any>} Parsed JSON body.
+ */
 async function api(path, opts) {
   const r = await fetch(path, opts);
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(body.detail ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : r.statusText);
   return body;
 }
+/**
+ * Build fetch options for a JSON POST.
+ * @param {object} o  Body to serialize.
+ * @returns {RequestInit}
+ */
 const json = (o) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) });
+/**
+ * Normalize user-typed color text to "#rrggbb" (adds "#", lowercases, expands #rgb).
+ * @param {string} v
+ * @returns {string|null} The hex, or null if it isn't a valid color.
+ */
 const normHex = (v) => { v = v.trim().replace(/^#?/, "#").toLowerCase(); if (/^#[0-9a-f]{3}$/.test(v)) v = "#" + [...v.slice(1)].map(c => c + c).join(""); return /^#[0-9a-f]{6}$/.test(v) ? v : null; };
+/**
+ * Convert "#rrggbb" to [r, g, b] (0 to 255).
+ * @param {string} h
+ * @returns {number[]}
+ */
 const hexRgb = (h) => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+/**
+ * Escape &, <, > and " for safe insertion into HTML.
+ * @param {*} s
+ * @returns {string}
+ */
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+/**
+ * Show an error (Error or string) in panel 1's #error box; a falsy value clears it.
+ * @param {Error|string|null} e
+ */
 function showError(e) { $("error").textContent = e ? (e.message || String(e)) : ""; }
+/**
+ * Return a wrapper that calls fn only after ms milliseconds without another call.
+ * @param {Function} fn
+ * @param {number} ms
+ * @returns {Function}
+ */
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
+/**
+ * Build the JSON body shared by /api/plan, /api/generate and /api/export from the current state.
+ * Requires state.session.
+ * @returns {object}
+ */
 function planRequest() {
   return {
     session_id: state.session.session_id, fabric_hex: state.fabric, prev_fabric_hex: state.prevFabric,
@@ -325,6 +471,12 @@ drop.addEventListener("dragleave", () => drop.classList.remove("over"));
 drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]); });
 $("file").addEventListener("change", (e) => e.target.files[0] && setFile(e.target.files[0]));
 
+/**
+ * Take a newly chosen image: reset background removal to auto, re-apply the
+ * server's stitch recommendations, show a thumbnail in the drop zone and analyze it.
+ * Does nothing beyond storing the file if the size doesn't fit the hoop.
+ * @param {File} f
+ */
 function setFile(f) {
   state.file = f;
   state.removeBg = "auto";
@@ -336,7 +488,16 @@ function setFile(f) {
 }
 
 const EDGE_MM = 0.5;   // kept free at each hoop edge (pull compensation stitches past the design's edge)
+/**
+ * Whether a w x h design fits a hw x hh field, upright or turned 90 degrees (0.05 mm tolerance).
+ * @returns {boolean}
+ */
 const fits = (w, h, hw, hh) => (w <= hw + .05 && h <= hh + .05) || (w <= hh + .05 && h <= hw + .05);
+/**
+ * Validate the design size against the hoop (minus EDGE_MM at each edge) and the 5 mm minimum.
+ * Shows the problem in #error, or clears it.
+ * @returns {boolean} True when the size is usable.
+ */
 function sizeOk() {
   const w = +$("w").value, h = +$("h").value, m = state.machine;
   if (!(m.hoopW >= 10 && m.hoopH >= 10)) { showError("Enter the hoop's stitch field in mm."); return false; }
@@ -345,11 +506,20 @@ function sizeOk() {
   showError(null);
   return true;
 }
+/**
+ * Re-analyze 500 ms after the width or height input stops changing.
+ */
 const reanalyze = debounce(() => state.file && sizeOk() && analyze(), 500);
 $("w").addEventListener("input", reanalyze);
 $("h").addEventListener("input", reanalyze);
 $("k").addEventListener("change", () => state.file && sizeOk() && analyze());
 
+/**
+ * Upload the image with the current size, hoop, color count, background and sliver settings
+ * to POST /api/analyze. Rebuilds state.colors from the palette (applying auto-merges), clears
+ * order, extras, result and export, locks the result tabs, applies recommendations for a new
+ * image, loads the label map and fetches the first plan. Generate stays disabled until it succeeds.
+ */
 async function analyze() {
   showError(null);
   const fd = new FormData();
@@ -391,6 +561,10 @@ async function analyze() {
   }
 }
 
+/**
+ * Show or hide the Remove background box and describe the detected edge color.
+ * @param {{hex: string, share: number, removed: boolean}|null} bg  session.background.
+ */
 function renderBackground(bg) {
   $("bgBox").hidden = !bg;
   if (!bg) return;
@@ -405,6 +579,12 @@ $("removeBg").addEventListener("change", (e) => {
   if (state.file && sizeOk()) analyze();
 });
 
+/**
+ * Decode the label-map PNG into state.labelData (ImageData). Each pixel's red channel
+ * is a palette id, so drawLive can recolor it without a server round trip.
+ * @param {string} url  Image URL from session.label_png.
+ * @returns {Promise<void>}
+ */
 function loadLabels(url) {
   return new Promise((res, rej) => {
     const img = new Image();
@@ -422,6 +602,9 @@ function loadLabels(url) {
 }
 
 // ------------------------------------------------------------------ fabric
+/**
+ * Render the fabric color preset buttons, highlighting the current fabric color.
+ */
 function renderPresets() {
   $("presets").innerHTML = Object.entries(PRESETS).map(([n, h]) =>
     `<button class="preset small${h === state.fabric ? " on" : ""}" data-hex="${h}"><i style="background:${h}"></i>${n}</button>`).join("");
@@ -430,6 +613,12 @@ $("presets").addEventListener("click", (e) => { const b = e.target.closest("[dat
 $("fabric").addEventListener("input", debounce((e) => setFabric(e.target.value), 150));
 $("fabricHex").addEventListener("change", (e) => { const h = normHex(e.target.value); h ? setFabric(h) : (e.target.value = state.fabric); });
 
+/**
+ * Change the fabric color. Remembers the previous color in state.prevFabric so the
+ * server can restore colors that were knocked out on it, syncs the inputs, then refreshes
+ * the plan (or just redraws when no image is loaded).
+ * @param {string} hex  "#rrggbb".
+ */
 function setFabric(hex) {
   if (hex === state.fabric) return;
   state.prevFabric = state.fabric;     // lets the server spot knockouts that need restoring
@@ -440,6 +629,12 @@ function setFabric(hex) {
 }
 
 // ------------------------------------------------------------------ plan (color decisions only)
+/**
+ * POST the current edits to /api/plan and redraw panel 2 and the live preview.
+ * Copies each color's fabric decision back into was_fabric (null for merged colors) and
+ * restored_from, and clears prevFabric. Errors are shown but the UI still re-renders.
+ * @returns {Promise<void>}
+ */
 async function refreshPlan() {
   if (!state.session) return;
   try {
@@ -458,6 +653,11 @@ async function refreshPlan() {
   renderThreads(); renderPlanWarnings(); drawLive(); markStale();
 }
 
+/**
+ * Follow merged_into links to the color that actually gets stitched (max 10 hops).
+ * @param {number} id  Palette id.
+ * @returns {object|undefined} Entry in state.colors.
+ */
 function effective(id) {
   let c = state.colors.find(x => x.id === id), guard = 0;
   while (c && c.merged_into != null && guard++ < 10) c = state.colors.find(x => x.id === c.merged_into);
@@ -465,6 +665,11 @@ function effective(id) {
 }
 
 // ------------------------------------------------------------------ thread list
+/**
+ * Render panel 2 from state.plan: one row per color in stitch order with number,
+ * color picker, hex, area, ΔE to fabric, auto/manual status, merged colors, Stitch/Fabric
+ * toggle and Merge into select, plus the extras chips. Hides the options when there is no plan.
+ */
 function renderThreads() {
   const ul = $("threads");
   const p = state.plan;
@@ -525,6 +730,10 @@ $("extras").addEventListener("click", (e) => {
 $("resetOrder").addEventListener("click", () => { state.order = null; refreshPlan(); });
 $("thinLines").addEventListener("change", (e) => { state.thinLines = e.target.checked; renderRecommend(); refreshPlan(); });
 $("satin").addEventListener("change", (e) => { state.satin = e.target.checked; renderRecommend(); refreshPlan(); });
+/**
+ * Show the "recommended" tags and the explanation from session.recommend,
+ * noting when the user changed the satin choice.
+ */
 function renderRecommend() {
   const r = state.session?.recommend;
   $("thinRec").hidden = !(r && r.thin_lines);
@@ -534,6 +743,7 @@ function renderRecommend() {
 }
 
 const ul = $("threads");
+/** Thread row buttons: Stitch, Fabric, reset to auto, unmerge. */
 ul.addEventListener("click", (e) => {
   const b = e.target.closest("button[data-act]"); if (!b) return;
   const li = b.closest("li"); const c = state.colors.find(x => x.id === +li.dataset.id);
@@ -545,6 +755,7 @@ ul.addEventListener("click", (e) => {
   else return;
   refreshPlan();
 });
+/** Thread row inputs: Merge into (also re-points colors merged into this one), hex text, color picker. */
 ul.addEventListener("change", (e) => {
   const el = e.target; const li = el.closest("li"); if (!li) return;
   const c = state.colors.find(x => x.id === +li.dataset.id);
@@ -594,6 +805,12 @@ ul.addEventListener("drop", (e) => {
 });
 
 // ------------------------------------------------------------------ warnings (plan + result)
+/**
+ * HTML for one warning, with a button per one-click fix (swap, outline, border).
+ * The fix is stored as JSON in data-fix and applied by the document click handler below.
+ * @param {{level: string, message: string, fixes?: object[]}} w
+ * @returns {string}
+ */
 function warningHtml(w) {
   const fixes = (w.fixes || []).map(f => {
     const sw = f.type === "swap" ? `<i style="background:${f.hex}"></i>` : "";
@@ -601,12 +818,20 @@ function warningHtml(w) {
   }).join("");
   return `<div class="warn ${w.level === "info" ? "info" : ""}">${esc(w.message)}${fixes ? `<div class="fixes">${fixes}</div>` : ""}</div>`;
 }
+/**
+ * Show the session and plan warnings ("Color checks") under panel 3, but only
+ * while there is no up-to-date result (the result shows its own warnings).
+ */
 function renderPlanWarnings() {
   // Before generating, show the color decisions' warnings live under the result panel.
   const ws = (state.session?.warnings || []).concat(state.plan?.warnings || []);
   $("planWarnings").innerHTML = state.result && !isStale() ? "" :
     (ws.length ? `<h3>Color checks</h3>` + ws.map(warningHtml).join("") : "");
 }
+/**
+ * Apply a warning's one-click fix (swap color, add outline, add border), refresh the plan,
+ * and regenerate if a result was already shown.
+ */
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-fix]"); if (!b) return;
   const f = JSON.parse(b.dataset.fix);
@@ -617,6 +842,12 @@ document.addEventListener("click", (e) => {
 });
 
 // ------------------------------------------------------------------ live preview
+/**
+ * Draw the live preview canvas: the fabric-colored hoop field (turned to match the
+ * design when that's how it fits), the label map recolored through a palette-id lookup table
+ * (knocked-out and merged colors resolved from the plan), centered, with a dashed hoop outline.
+ * Stores the hoop orientation in state.liveHoop and refreshes the current tab.
+ */
 function drawLive() {
   const cv = $("live");
   if (!state.labelData) { cv.hidden = true; return; }
@@ -649,6 +880,11 @@ function drawLive() {
   showTab(state.tab);
 }
 
+/**
+ * Switch the preview to a tab and update the image, badge text and stale overlay.
+ * Stitch-out uses the export report's preview when there is one, else the stitched preview.
+ * @param {"live"|"result"|"problems"|"stitchout"} tab
+ */
 function showTab(tab) {
   state.tab = tab;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
@@ -667,6 +903,11 @@ function showTab(tab) {
   $("stale").hidden = !(state.result && tab !== "live" && isStale());
 }
 const TAB_NEEDS = { result: "generate", problems: "generate", stitchout: "export" };
+/**
+ * Mark every tab except Live and the given ones as locked, with a tooltip saying
+ * what to do first (TAB_NEEDS).
+ * @param {string[]} unlocked  Tab names to leave clickable.
+ */
 function lockTabs(unlocked) {
   document.querySelectorAll("#tabs button").forEach(b => {
     const locked = b.dataset.tab !== "live" && !unlocked.includes(b.dataset.tab);
@@ -676,6 +917,7 @@ function lockTabs(unlocked) {
   });
   $("tabsHint").textContent = "";
 }
+/** Tab clicks: switch tabs, or for a locked tab explain what to click first and nudge that button. */
 $("tabs").addEventListener("click", (e) => {
   const b = e.target.closest("button");
   if (!b) return;
@@ -688,8 +930,21 @@ $("tabs").addEventListener("click", (e) => {
 });
 
 // ------------------------------------------------------------------ generate
+/**
+ * Key identifying the settings a result was generated from (the plan request
+ * without the one-shot prev_fabric_hex).
+ * @returns {string}
+ */
 const requestKey = () => JSON.stringify({ ...planRequest(), prev_fabric_hex: null });
+/**
+ * True when the current settings differ from the ones state.result was made from.
+ * @returns {boolean}
+ */
 const isStale = () => state.resultKey !== requestKey();
+/**
+ * Update the stale overlay, the result area's visibility and the live color checks
+ * after any settings change.
+ */
 function markStale() {
   $("stale").hidden = !(state.result && state.tab !== "live" && isStale());
   $("out").hidden = !state.result;
@@ -697,6 +952,12 @@ function markStale() {
 }
 
 $("generate").addEventListener("click", generate);
+/**
+ * POST /api/generate, store the result with its requestKey, render it, unlock
+ * the Stitch result and Problem areas tabs, drop any old export, and open Problem areas
+ * if there are narrow gap or narrow stitch warnings (else Stitch result).
+ * @returns {Promise<void>}
+ */
 async function generate() {
   const btn = $("generate");
   btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>Generating…`;
@@ -713,6 +974,10 @@ async function generate() {
   markStale();
 }
 
+/**
+ * Fill the result area from state.result: warnings, fabric advice, summary, thread
+ * table, the machine/export section, and a blob URL for the SVG download (revoking the old one).
+ */
 function renderResult() {
   const r = state.result;
   $("out").hidden = false;
@@ -746,19 +1011,38 @@ function renderResult() {
 
 // ------------------------------------------------------------------ machine
 const MACHINE = { inkstitch: null, manual_steps: [], formats: {}, hoops: {} };
+/**
+ * Current machine file extension with a dot, e.g. ".pes".
+ * @returns {string}
+ */
 const fmtLabel = () => "." + state.machine.format;
+/**
+ * Format a hoop size as "w × h mm".
+ * @returns {string}
+ */
 const hoopText = (w, h) => `${w} × ${h} mm`;
 
+/**
+ * Persist machine, stitch slider and fabric type settings to localStorage (errors ignored).
+ */
 function saveMachine() {
   try { localStorage.setItem("machine", JSON.stringify(state.machine)); localStorage.setItem("stitch", JSON.stringify(state.stitch));
         localStorage.setItem("fabricType", state.fabricType); } catch {}
 }
+/**
+ * Restore saved settings from localStorage into state. Each key is read separately so
+ * one bad value doesn't discard the others.
+ */
 function loadMachine() {
   try { const m = JSON.parse(localStorage.getItem("machine") || "null"); if (m && m.format) Object.assign(state.machine, m); } catch {}
   try { const st = JSON.parse(localStorage.getItem("stitch") || "null"); if (st) Object.assign(state.stitch, st); } catch {}
   try { state.fabricType = localStorage.getItem("fabricType") || state.fabricType; } catch {}
 }
 
+/**
+ * Sync the overlap, pull and sliver sliders and readouts with state.stitch, and tag
+ * pull compensation as the fabric's value or "custom" (showing "reset to fabric").
+ */
 function renderStitchSliders() {
   for (const k of ["overlap", "pull", "sliver"]) {
     $(k).value = state.stitch[k];
@@ -769,6 +1053,9 @@ function renderStitchSliders() {
   $("pullTag").textContent = f ? (custom ? "custom" : f.label.split(" (")[0].toLowerCase()) : "";
   $("pullFabric").hidden = !custom;
 }
+/**
+ * Re-analyze 500 ms after the sliver slider stops moving (sliver cleanup runs at analysis).
+ */
 const reanalyzeSliver = debounce(() => state.file && sizeOk() && analyze(), 500);
 for (const k of ["overlap", "pull", "sliver"]) {
   $(k).addEventListener("input", () => {
@@ -784,13 +1071,25 @@ $("stitchReset").addEventListener("click", () => {
 });
 
 // ------------------------------------------------------------------ fabric type
+/**
+ * Settings for the current fabric type from /api/machine (pull comp, stabilizer, needle, ...).
+ * @returns {object|undefined}
+ */
 const fabricProfile = () => MACHINE.fabrics?.[state.fabricType];
+/**
+ * Fill the fabric type select and its stabilizer/needle hint.
+ */
 function renderFabricType() {
   $("fabricType").innerHTML = Object.entries(MACHINE.fabrics || {}).map(([k, f]) =>
     `<option value="${k}"${k === state.fabricType ? " selected" : ""}>${esc(f.label)}</option>`).join("");
   const f = fabricProfile();
   if (f) $("fabricTypeHint").textContent = `${f.stabilizer} stabilizer · ${f.needle} needle. Sets pull compensation, fill density and underlay.`;
 }
+/**
+ * Select a fabric type and reset pull compensation to that fabric's value, replacing
+ * any manual tweak. Marks the result stale.
+ * @param {string} key  Key into MACHINE.fabrics.
+ */
 function setFabricType(key) {
   state.fabricType = key;
   const f = fabricProfile();
@@ -800,6 +1099,10 @@ function setFabricType(key) {
 $("fabricType").addEventListener("change", (e) => setFabricType(e.target.value));
 $("pullFabric").addEventListener("click", (e) => { e.preventDefault(); setFabricType(state.fabricType); });
 
+/**
+ * Fill the format and hoop selects from MACHINE, show the custom hoop inputs when
+ * chosen, and sync hoop size, speed and the export button label.
+ */
 function renderMachinePickers() {
   const m = state.machine;
   $("format").innerHTML = Object.entries(MACHINE.formats).map(([k, f]) =>
@@ -814,6 +1117,12 @@ function renderMachinePickers() {
   $("exportBtn").textContent = `Export ${fmtLabel()}`;
 }
 
+/**
+ * Use a new hoop size: save it, set the design size to fill the hoop (minus edge
+ * margins) in the image's orientation, and re-analyze if an image is loaded.
+ * @param {number} w  Hoop width in mm.
+ * @param {number} h  Hoop height in mm.
+ */
 function setHoop(w, h) {
   const m = state.machine;
   m.hoopW = w; m.hoopH = h; saveMachine();
@@ -835,6 +1144,9 @@ $("hoop").addEventListener("change", (e) => {
   const h = MACHINE.hoops[e.target.value];
   setHoop(h.w, h.h);
 });
+/**
+ * Apply the custom hoop inputs 600 ms after typing stops, if both are 10 to 400 mm.
+ */
 const customHoop = debounce(() => {
   const w = +$("hoopW").value, h = +$("hoopH").value;
   if (w >= 10 && h >= 10 && w <= 400 && h <= 400) setHoop(w, h);
@@ -847,6 +1159,7 @@ $("speed").addEventListener("input", debounce(() => {
   if (v >= 50 && v <= 2000) { state.machine.speed = v; saveMachine(); markStale(); }
 }, 400));
 
+// Startup: restore saved settings, then load machine options from the server and fill the pickers.
 loadMachine();
 renderStitchSliders();
 fetch("/api/machine").then(r => r.json()).then(m => {
@@ -857,6 +1170,10 @@ fetch("/api/machine").then(r => r.json()).then(m => {
   $("w").value = state.machine.hoopW - 2 * EDGE_MM; $("h").value = state.machine.hoopH - 2 * EDGE_MM;
 }).catch(() => {});
 
+/**
+ * Fill the machine file summary (thread changes, stitches, time, jumps). Uses the export
+ * report's real numbers when there is one, else the estimates from /api/generate (marked ≈).
+ */
 function renderMachine() {
   const m = state.result.machine, ex = state.export?.report;
   const stitches = ex ? ex.stitches : m.estimated_stitches;
@@ -871,6 +1188,12 @@ function renderMachine() {
     <span>Jumps to trim</span><b>${ex ? "" : "≈ "}${jumps} (by hand, unless your machine trims jumps)</b>`;
 }
 
+/**
+ * Render the export area for the current state.export: manual Inkscape steps when
+ * Ink/Stitch isn't installed, a spinner while running, the error, or the finished report
+ * (read-back checks, thread change list with what the machine screen shows, jumps to trim,
+ * and the download link). Does nothing before a result exists.
+ */
 function renderExport() {
   const out = $("exportOut"), btn = $("exportBtn");
   if (!state.result) return;
@@ -901,6 +1224,11 @@ function renderExport() {
     [r.longest_stitch_mm <= r.max_stitch_mm, `Longest stitch ${r.longest_stitch_mm} mm (limit ${r.max_stitch_mm} mm)`],
     [r.color_blocks === state.result.machine.thread_blocks, `${r.color_blocks} color block${r.color_blocks === 1 ? "" : "s"}, each color stitched once`],
   ];
+  /**
+   * What the machine's screen shows at a color stop: the palette name, or just the stop number.
+   * @param {object} t  Thread from the export report.
+   * @returns {string}
+   */
   const screen = (t) => r.palette
     ? `screen: <span class="sw" style="background:${t.hex}"></span>${esc(t.machine_name || t.hex)}`
     : `stop ${t.order}`;
@@ -926,6 +1254,11 @@ function renderExport() {
     <div style="margin-top:12px"><a class="btn primary" href="/api/export/${ex.job_id}/file" download>Download ${ext}</a></div>`;
 }
 
+/**
+ * Export button: regenerate if the result is stale, start an export job, then poll
+ * GET /api/export/{id} every 2 s while it runs. Polling stops if a newer job replaced
+ * this one. When done, unlock and show the Stitch-out tab.
+ */
 $("exportBtn").addEventListener("click", async () => {
   try {
     const key = requestKey();

@@ -1,3 +1,26 @@
+"""Pipeline and HTTP API tests: image in, Ink/Stitch SVG and stitch plan out.
+
+Covers the routes the UI uses (/api/analyze, /api/plan, /api/generate) through
+FastAPI's TestClient, plus a few direct calls into embroidery.pipeline and
+embroidery.vectorize. Checks color detection and cleanup, background removal,
+sizing and hoop fitting, fabric knockouts and restores, low-contrast fixes,
+fabric-type stitch settings, thin-line outlines, satin columns and the
+recommendations shown for a new image. None of these need Ink/Stitch.
+
+Run from the repo root:
+    pytest                      # everything (Ink/Stitch tests skip if it's missing)
+    pytest -m "not inkstitch"   # the fast run, no real Ink/Stitch exports
+    pytest tests/test_pipeline.py
+
+Inputs are synthetic images from tests/fixtures.py.
+
+Helpers defined here:
+    client      module-scoped TestClient fixture
+    analyze     upload an image to /api/analyze, return the session payload
+    request     build a plan/generate body that sends every color unchanged
+    layers_of   parse an SVG, return its root and Inkscape layer groups
+    check_svg   assert the SVG's structure (hoop canvas, centering, fill params, layer labels)
+"""
 import math
 import re
 import xml.etree.ElementTree as ET
@@ -16,10 +39,27 @@ STITCH = "{http://inkstitch.org/namespace}"
 
 @pytest.fixture(scope="module")
 def client():
+    """Module-scoped FastAPI TestClient for the app.
+
+    Tests drive the real HTTP routes (/api/analyze, /api/plan, /api/generate)
+    in-process, so request validation and payload shapes are covered too.
+    """
     return TestClient(app)
 
 
 def analyze(client, data, name, w=99, h=99, remove_bg="auto", hoop=(100, 100)):
+    """POST an image to /api/analyze and return the session payload.
+
+    Args:
+        client: the TestClient.
+        data: image bytes (PNG, JPG or SVG).
+        name: upload filename (its extension matters for SVG input).
+        w, h: requested design size in mm.
+        remove_bg: "auto", "on" or "off".
+        hoop: (width, height) of the hoop's stitch field in mm.
+
+    Asserts a 200 response so a failed upload shows the server's error text.
+    """
     r = client.post("/api/analyze", files={"file": (name, data)},
                     data={"width_mm": w, "height_mm": h, "remove_bg": remove_bg,
                           "hoop_w": hoop[0], "hoop_h": hoop[1]})
@@ -28,17 +68,39 @@ def analyze(client, data, name, w=99, h=99, remove_bg="auto", hoop=(100, 100)):
 
 
 def request(session, fabric="#ffffff", **extra):
+    """Build a plan/generate request body for a session.
+
+    Every palette color is sent with its detected hex and no overrides, so the
+    server makes all the automatic decisions. Extra keyword arguments (e.g.
+    hoop_w, format, thin_lines) are merged into the body as-is.
+    """
     return {"session_id": session["session_id"], "fabric_hex": fabric,
             "colors": [{"id": p["id"], "hex": p["hex"]} for p in session["palette"]], **extra}
 
 
 def layers_of(svg_text):
+    """Parse an SVG string and return (root element, list of Inkscape layer groups).
+
+    Layers are the <g inkscape:groupmode="layer"> elements, one per thread color
+    in stitch order.
+    """
     root = ET.fromstring(svg_text)
     return root, [g for g in root.iter(f"{SVG}g") if g.get(f"{INK}groupmode") == "layer"]
 
 
 def check_svg(svg_text, w_mm, h_mm, hoop=(100, 100)):
-    """The canvas is the hoop's stitch field (default 4×4 = 100×100 mm); the w×h design is centered on it."""
+    """The canvas is the hoop's stitch field (default 4×4 = 100×100 mm); the w×h design is centered on it.
+
+    Shared structural check for every generated SVG. Asserts that:
+    the root width, height and viewBox are the hoop size in mm; there is at
+    least one path; the design's bounding box is centered on the hoop (within
+    1.5 mm) and no larger than w_mm x h_mm; running-stitch outlines have no
+    fill; every other path is a tatami or contour fill, tatami angles are
+    multiples of 5 in [0, 180), and fills use evenodd with no stroke; layer
+    labels are numbered 1, 2, ... in stitch order.
+
+    Returns (root, layers) so callers can make further assertions.
+    """
     root, layers = layers_of(svg_text)
     hw, hh = hoop
     assert root.get("width") == f"{hw:g}mm"
@@ -68,6 +130,13 @@ def check_svg(svg_text, w_mm, h_mm, hoop=(100, 100)):
 
 
 def test_flat_logo_svg(client):
+    """A flat 3-color logo on white becomes a clean 2-layer Ink/Stitch SVG.
+
+    The white background matches the white fabric, so it is knocked out (noted
+    in the SVG, not stitched) and only the two greens get thread layers, named
+    and numbered in stitch order, each with only a few shapes. This is the
+    basic happy path of the whole pipeline.
+    """
     s = analyze(client, flat_logo_png(), "logo.png")
     assert s["k"] == 3 and (s["width_mm"], s["height_mm"]) == (99, 99)
     r = client.post("/api/generate", json=request(s)).json()
@@ -80,6 +149,12 @@ def test_flat_logo_svg(client):
 
 
 def test_messy_trace_is_cleaned(client):
+    """A messy auto-traced SVG is reduced to its real colors and shapes.
+
+    Hidden layers, transparent shapes and embedded bitmaps must not leak into the
+    palette, the white margin is removed as background, near-duplicate navy fills
+    merge, and the 400 tiny specks are cleaned up, leaving a few paths per color.
+    """
     s = analyze(client, messy_traced_svg(), "trace.svg")
     hexes = [p["hex"] for p in s["palette"]]
     # navy, red, gold — the white margin is removed as background
@@ -93,18 +168,32 @@ def test_messy_trace_is_cleaned(client):
 
 
 def test_aspect_ratio_kept_and_centered(client):
+    """The design is fitted inside the requested W x H box with its aspect ratio kept.
+
+    A square design asked to fit 99 x 50 mm comes out 50 mm tall and no wider
+    than 50 mm, and is still centered on the hoop canvas.
+    """
     s = analyze(client, messy_traced_svg(), "trace.svg", w=99, h=50)
     assert s["height_mm"] == 50 and s["width_mm"] <= 50
     check_svg(client.post("/api/generate", json=request(s)).json()["svg"], s["width_mm"], s["height_mm"])
 
 
 def test_larger_than_hoop_is_blocked(client):
+    """/api/analyze rejects a design size that can't fit the default 100 x 100 mm hoop.
+
+    The 400 error names the hoop size so the user knows what to change.
+    """
     r = client.post("/api/analyze", files={"file": ("logo.png", flat_logo_png())},
                     data={"width_mm": 110, "height_mm": 100})
     assert r.status_code == 400 and "100" in r.json()["detail"]
 
 
 def test_bigger_hoop_rotates_to_fit_landscape_design(client):
+    """A landscape design that only fits a 5x7 hoop sideways is accepted and rotated.
+
+    Also checks that the machine speed (spm) from the request is used for the
+    stitch-time estimate.
+    """
     # 170×85 doesn't fit a 5×7 hoop upright (130 wide) but does rotated (180×130)
     s = analyze(client, messy_traced_svg(), "trace.svg", w=170, h=85, hoop=(130, 180))
     assert s["height_mm"] == 85
@@ -115,6 +204,11 @@ def test_bigger_hoop_rotates_to_fit_landscape_design(client):
 
 
 def test_hoop_limits_and_formats_validated(client):
+    """Size limits are checked against the chosen hoop, and unknown formats are rejected.
+
+    A 150 x 150 mm design is refused for a 130 x 180 hoop (the error names that
+    hoop), an unsupported format returns 400 and a supported one (jef) works.
+    """
     r = client.post("/api/analyze", files={"file": ("logo.png", flat_logo_png())},
                     data={"width_mm": 150, "height_mm": 150, "hoop_w": 130, "hoop_h": 180})
     assert r.status_code == 400 and "130 × 180" in r.json()["detail"]
@@ -124,6 +218,11 @@ def test_hoop_limits_and_formats_validated(client):
 
 
 def test_svg_is_stamped_for_current_inkstitch(client):
+    """The SVG carries the Ink/Stitch SVG version stamp (version 4).
+
+    Without it, Ink/Stitch treats the file as legacy, rewrites its parameters
+    and pops an "update?" dialog.
+    """
     s = analyze(client, flat_logo_png(), "logo.png")
     svg = client.post("/api/generate", json=request(s)).json()["svg"]
     # without the stamp Ink/Stitch rewrites params as legacy and opens an "update?" dialog
@@ -131,6 +230,12 @@ def test_svg_is_stamped_for_current_inkstitch(client):
 
 
 def test_pull_compensation_and_overlap(client):
+    """Pull compensation and color overlap settings reach the SVG and behave as intended.
+
+    Pull compensation is written on every tatami fill when set and absent when 0.
+    Overlap adds stitched area under neighboring colors (more stitches) but never
+    grows the design's outer extent. An out-of-range overlap is rejected with 400.
+    """
     s = analyze(client, flat_logo_png(), "logo.png")        # dark and light green touch
     req = request(s, fabric="#ffffff")
     plain = client.post("/api/generate", json={**req, "overlap_mm": 0, "pull_comp_mm": 0}).json()
@@ -144,6 +249,7 @@ def test_pull_compensation_and_overlap(client):
     assert tuned["machine"]["estimated_stitches"] > plain["machine"]["estimated_stitches"]
 
     def extent(svg):
+        """Horizontal extent (mm) of all path coordinates in an SVG."""
         nums = [float(v) for p in layers_of(svg)[0].iter(f"{SVG}path") for v in re.findall(r"-?\d+(?:\.\d+)?", p.get("d"))]
         return max(nums[0::2]) - min(nums[0::2])
     assert extent(tuned["svg"]) <= extent(plain["svg"]) + 0.05
@@ -151,7 +257,13 @@ def test_pull_compensation_and_overlap(client):
 
 
 def test_overlap_closes_hairline_fabric_gaps():
-    """Two colors with a 0.3 mm fabric line between them: overlap 0.3 closes it."""
+    """Two colors with a 0.3 mm fabric line between them: overlap 0.3 closes it.
+
+    With overlap 0 the hairline is reported as a narrow_gap warning (it would
+    close up when stitched); overlap 0.3 mm lets the colors reach under each
+    other so the warning goes away. Background removal is off and sliver
+    cleanup is low so the gap survives analysis.
+    """
     from PIL import Image, ImageDraw
     import io
     img = Image.new("RGB", (1000, 1000), "white")
@@ -168,7 +280,11 @@ def test_overlap_closes_hairline_fabric_gaps():
 
 def test_sliver_cleanup_absorbs_thin_bands():
     """A 0.5 mm fabric line between two colors survives the default cleanup (and is
-    flagged as a gap that will close up) but is absorbed at sliver_mm=0.7."""
+    flagged as a gap that will close up) but is absorbed at sliver_mm=0.7.
+
+    Overlap is 0 so only the sliver setting decides whether the gap remains.
+    This is the "Absorb slivers under" slider in the UI.
+    """
     from PIL import Image, ImageDraw
     import io
     img = Image.new("RGB", (1000, 1000), "white")
@@ -178,6 +294,7 @@ def test_sliver_cleanup_absorbs_thin_bands():
     buf = io.BytesIO(); img.save(buf, "PNG")
 
     def gaps(sliver):
+        """Generate at the given sliver_mm and return the narrow_gap warnings."""
         s = pipeline.new_session(buf.getvalue(), "gap.png", 100, 100, None, remove_bg="off", sliver_mm=sliver)
         r = pipeline.generate(s, {"fabric_hex": "#ffffff", "overlap_mm": 0,
                                   "colors": [{"id": i, "hex": h} for i, h in enumerate(s.hexes)]})
@@ -187,6 +304,11 @@ def test_sliver_cleanup_absorbs_thin_bands():
 
 
 def test_machine_summary(client):
+    """The machine summary has sensible estimates for the flat logo.
+
+    Two thread colors means one thread change, the stitch estimate is
+    non-trivial, and the time estimate uses the default 400 spm.
+    """
     s = analyze(client, flat_logo_png(), "logo.png")
     m = client.post("/api/generate", json=request(s)).json()["machine"]
     assert m["thread_changes"] == 1 and m["estimated_stitches"] > 1000
@@ -194,6 +316,14 @@ def test_machine_summary(client):
 
 
 def test_fabric_change_restores_knockout(client):
+    """Switching fabric color restores a color that was knocked out on the old fabric.
+
+    White is knocked out on white fabric. When the fabric becomes navy (sending
+    prev_fabric_hex and each color's was_fabric), white must come back as a
+    stitched layer labeled "(fabric was white)", with a "restored" warning, a
+    black bobbin suggestion, and underlay plus denser rows so light thread on
+    dark fabric doesn't sink in.
+    """
     s = analyze(client, flat_logo_png(), "logo.png")
     req = request(s)
     white = next(p["id"] for p in s["palette"] if p["hex"] == "#ffffff")
@@ -218,6 +348,12 @@ def test_fabric_change_restores_knockout(client):
 
 
 def test_low_contrast_warning_and_outline_fix(client):
+    """Colors close to the fabric are knocked out or warned, and the outline fix works.
+
+    At ΔE about 4 the dark green is treated as fabric automatically. At ΔE about
+    10 it is stitched but gets a low_contrast warning offering swap and outline
+    fixes. Applying the outline fix adds an outline layer stitched as contour fill.
+    """
     s = analyze(client, flat_logo_png(), "logo.png")
     dark = next(p["id"] for p in s["palette"] if p["hex"] == "#1b5e20")
     # ΔE 4: so close it's knocked out as fabric automatically
@@ -237,6 +373,13 @@ def test_low_contrast_warning_and_outline_fix(client):
 
 
 def test_stitch_params_rules():
+    """Unit test of vectorize.stitch_params: which fill method and settings each shape gets.
+
+    Thin shapes and rings get contour fill (density but never underlay), boxy
+    shapes get tatami at 45 degrees (never 0/90), slanted shapes follow their
+    angle, and light-on-dark rows are never sparser than 0.25 mm while denser
+    fabric settings still win.
+    """
     from shapely.geometry import Point, box
     from embroidery.vectorize import stitch_params
 
@@ -259,6 +402,13 @@ def test_stitch_params_rules():
 
 
 def test_fabric_type_sets_stitches_and_advice(client):
+    """The fabric type changes stitch settings and the "Before you stitch" advice.
+
+    Cotton uses tear-away and plain tatami. Towel adds underlay and 0.22 mm rows
+    (so more stitches), suggests a topping, and is recorded in the SVG's
+    embroidery-magic metadata. Performance fabric warns about stitch count only
+    above 8000 stitches. An unknown fabric type returns 400.
+    """
     from embroidery import fabrics
     s = analyze(client, flat_logo_png(), "logo.png")
     cotton = client.post("/api/generate", json=request(s)).json()
@@ -284,6 +434,11 @@ def test_fabric_type_sets_stitches_and_advice(client):
 
 
 def test_beanie_warns_when_too_tall(client):
+    """The beanie fabric warns when the design is too tall for a beanie cuff.
+
+    A folded cuff gives about 55 mm, so an 80 mm design gets a fabric_height
+    warning and a 50 mm one does not.
+    """
     s = analyze(client, flat_logo_png(), "logo.png", w=80, h=80)
     r = client.post("/api/generate", json={**request(s), "fabric_type": "beanie"}).json()
     assert r["fabric"]["key"] == "beanie"
@@ -295,11 +450,19 @@ def test_beanie_warns_when_too_tall(client):
 
 
 def test_bad_upload(client):
+    """An upload that isn't a readable image returns 422 instead of crashing the server."""
     r = client.post("/api/analyze", files={"file": ("x.png", b"not an image")})
     assert r.status_code == 422
 
 
 def test_background_removed_but_interior_kept_on_navy(client):
+    """Background removal drops only the edge-connected margin, not same-colored interior.
+
+    The white margin of the ringed badge is removed and the design is cropped to
+    fill 99 mm, while the white inside the ring stays a thread color that is
+    stitched on navy fabric (its area matches the ring interior minus the gold
+    square). With remove_bg="off" the margin is part of the design again.
+    """
     s = analyze(client, ringed_badge_png(), "badge.png")
     assert s["background"]["hex"] == "#ffffff" and s["background"]["removed"]
     assert s["width_mm"] == 99                        # cropped to the badge, fills the size
@@ -319,6 +482,13 @@ def test_background_removed_but_interior_kept_on_navy(client):
 
 
 def test_thin_outline_becomes_running_stitch(client):
+    """Outlines under 1 mm wide become a triple running stitch when thin_lines is on.
+
+    The ~0.6 mm black ring is written as one or a few running-stitch paths with
+    bean_stitch_repeats=1 (triple run), the 4 mm bar stays a fill, and no
+    narrow_stitch warning is raised for black. With thin_lines=False the ring is
+    left as a fill and a narrow_stitch warning appears instead.
+    """
     s = analyze(client, thin_outline_png(), "outline.png")
 
     r = client.post("/api/generate", json=request(s)).json()
@@ -338,6 +508,12 @@ def test_thin_outline_becomes_running_stitch(client):
 
 
 def test_satin_mode_turns_strokes_into_satin_columns(client):
+    """satin=True turns steady-width strokes into satin columns and leaves blobs as fills.
+
+    Each satin path has exactly two rails with paired nodes, is drawn as a stroke
+    with the expected zigzag spacing, and satin mode adds no new narrow-gap
+    warnings where columns meet the rest of the shape.
+    """
     s = analyze(client, script_stroke_png(), "script.png")
     off = client.post("/api/generate", json=request(s)).json()
     assert "satin_column" not in off["svg"] and off["layers"][0]["satins"] == 0
@@ -356,6 +532,13 @@ def test_satin_mode_turns_strokes_into_satin_columns(client):
 
 
 def test_satin_column_geometry():
+    """Unit test of vectorize.split_satin and satin_params on raster masks.
+
+    A 3 mm stroke becomes one satin column of about that width with equal-length
+    rails, while a 16 mm blob and a 9 mm bar (too wide) stay fills. A bar ending
+    in a serif leaves fill only at the serif end, with no strips along the
+    column. satin_params applies fabric density and underlay settings.
+    """
     import cv2
     import numpy as np
     from embroidery.raster import PX_PER_MM
@@ -386,6 +569,11 @@ def test_satin_column_geometry():
 
 
 def test_satin_mode_stitches_hairlines_as_1mm_satin(client):
+    """In satin mode, hairline outlines become satin columns at least 1 mm wide.
+
+    Without satin the thin ring is a running-stitch line; with satin there are no
+    lines left and every satin column's rails are at least about 1 mm apart.
+    """
     s = analyze(client, thin_outline_png(), "outline.png")        # a ~0.6 mm outline ring
     off = client.post("/api/generate", json=request(s)).json()
     assert sum(l["lines"] for l in off["layers"]) >= 1
@@ -403,6 +591,12 @@ def test_satin_mode_stitches_hairlines_as_1mm_satin(client):
 
 
 def test_recommends_satin_for_strokes_and_fills_for_solid_art(client):
+    """/api/analyze recommends stitch options that suit the image.
+
+    Stroke-like script art gets satin (and thin lines) recommended with a reason;
+    flat solid art gets thin lines but not satin. The UI applies these to a new
+    image.
+    """
     script = analyze(client, script_stroke_png(), "script.png")["recommend"]
     assert script["satin"] and script["thin_lines"] and "recommended" in script["why"]
     flat = analyze(client, flat_logo_png(), "logo.png")["recommend"]

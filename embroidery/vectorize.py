@@ -1,4 +1,74 @@
-"""Steps 4 and 7 — label mask -> clean shapely polygons, and per-shape stitch settings."""
+"""Steps 4 and 7 — label mask -> clean shapely polygons, and per-shape stitch settings.
+
+Where this sits in the flow:
+
+    upload -> raster.py (rasterize) -> palette.py (colors, label map)
+    -> vectorize.py (shapes, stitch settings) -> pipeline.py (sessions, color
+    decisions, generation) -> svg_out.py (Ink/Stitch SVG) -> export.py (machine file)
+
+pipeline.py builds one boolean *mask* per thread color (``labels == i`` on the
+palette.py label map) and hands it to this module, which turns it into
+geometry Ink/Stitch can sew, plus the Ink/Stitch parameters for each piece.
+Nothing here knows about sessions, fabric names or SVG; it only takes masks
+and numbers and returns shapes and ``{param: value}`` dicts (the keys are
+Ink/Stitch's own attribute names, written by svg_out.py as ``inkstitch:<key>``).
+
+Units and coordinates:
+    * Masks are HxW arrays at ``raster.PX_PER_MM`` (20 px/mm). Pixel (y, x)
+      maps to the mm point ((x + 0.5) / PX_PER_MM, (y + 0.5) / PX_PER_MM),
+      i.e. the pixel's center.
+    * All geometry returned (shapely polygons and lines, ``Satin`` rails) is
+      in mm, with y pointing down as in SVG.
+    * Skeleton chains (``_trace``) are lists of (y, x) pixel tuples.
+
+The three stitch modes:
+
+1. **Fills** (always). ``mask_to_polygons`` traces the mask into polygons
+   with holes; ``stitch_params`` picks per polygon either
+   ``fill_method="contour_fill"`` (thin shapes and rings, see
+   ``is_thin_or_ring``) or ``fill_method="tatami_fill"`` with an ``angle``
+   along the shape's long axis (``long_axis_angle``, 45 degrees for boxy
+   shapes, see ``mostly_axis_aligned``), plus the fabric's density, underlay
+   and pull compensation.
+
+2. **Thin lines as running stitch** ("Stitch thin lines as outlines").
+   ``split_thin`` removes features narrower than ``THIN_LINE_MM`` (1 mm) from
+   the mask and returns their centerlines (from the mask's skeleton) as
+   LineStrings, joined into long runs by ``_join_chains``. They are sewn with
+   ``LINE_PARAMS``: ``stroke_method="running_stitch"``, 2 mm stitches,
+   ``bean_stitch_repeats="1"`` (a triple stitch).
+
+3. **Satin columns** ("Stitch narrow strokes as satin"). ``split_satin`` walks
+   the skeleton of the (already thin-line-free) mask: ``_trace`` cuts it into
+   chains between junctions, ``_join_smooth`` joins chains that continue each
+   other with less than ``SATIN_MAX_TURN_DEG`` of turn, and every stretch of
+   steady ``SATIN_MIN_MM``..``SATIN_MAX_MM`` width becomes a ``Satin`` via
+   ``_column``. What the columns don't cover stays in the mask and is filled.
+   In satin mode pipeline.py also passes each ``split_thin`` centerline to
+   ``line_satin``, which turns hairlines into ``LINE_SATIN_MM`` (1 mm) satin
+   columns so they match the lettering; lines it rejects stay running
+   stitch. ``satin_params`` gives every column ``satin_column="true"``, the
+   zig-zag spacing and underlay. svg_out.py writes a column as one path with
+   two subpaths, ``Satin.rail1`` and ``Satin.rail2``, which have equal node
+   counts so Ink/Stitch pairs them node by node without rungs.
+
+Typical order per color (pipeline.py): ``split_thin`` -> ``split_satin`` ->
+``line_satin`` on the lines -> ``mask_to_polygons`` on what is left ->
+``stitch_params`` / ``satin_params`` / ``LINE_PARAMS`` at generation time.
+``band`` makes the 1 mm outline and border layers.
+
+Gotchas:
+    * ``mask_to_polygons`` grows each mask by 1 px so neighboring colors
+      overlap instead of leaving seams; the size limits and stitch_params
+      see the grown shape (split_thin / split_satin work on the mask as given).
+    * Small parts (< ``MIN_PART_MM2``) are dropped and small holes
+      (< ``MIN_HOLE_MM2``) are filled over; palette.py's clean-up absorbs
+      specks first, so dropping them leaves no gap.
+    * Skeletons stop about half a stroke width short of a stroke's end, so
+      ``_column`` extends each column past its skeleton ends.
+    * Angles follow Ink/Stitch: degrees counter-clockwise from horizontal as
+      seen on screen, so the y axis is flipped when computing them.
+"""
 from __future__ import annotations
 
 import math
@@ -10,16 +80,21 @@ from shapely.geometry.base import BaseGeometry
 
 from .raster import PX_PER_MM
 
-MIN_PART_MM2 = 1.0
-MIN_HOLE_MM2 = 0.8
-SIMPLIFY_MM = 0.04
+MIN_PART_MM2 = 1.0        # polygons smaller than this (mm²) are dropped
+MIN_HOLE_MM2 = 0.8        # holes smaller than this (mm²) are filled over
+SIMPLIFY_MM = 0.04        # Douglas-Peucker tolerance for traced outlines
 THIN_RATIO_MM = 1.2       # area / perimeter below this -> contour fill
 RING_HOLE_SHARE = 0.5     # one hole covering more than this share of the outline -> ring
-AXIS_TOL_DEG = 3.0
-AXIS_SHARE = 0.6
+AXIS_TOL_DEG = 3.0        # an edge within this of horizontal/vertical counts as axis-aligned
+AXIS_SHARE = 0.6          # share of outline length that must be axis-aligned for mostly_axis_aligned
 
 
 def polygons(geom: BaseGeometry) -> list[Polygon]:
+    """Flatten any shapely geometry into its list of Polygons.
+
+    Polygons and MultiPolygons are unpacked; collections are walked
+    recursively; lines, points and empty geometries contribute nothing.
+    """
     if geom.is_empty:
         return []
     if isinstance(geom, Polygon):
@@ -32,12 +107,25 @@ def polygons(geom: BaseGeometry) -> list[Polygon]:
 
 
 def _ring_mm(cnt: np.ndarray) -> list[tuple[float, float]]:
+    """OpenCV contour (Nx1x2 pixel x, y) -> list of mm points at the pixel centers."""
     pts = cnt.reshape(-1, 2).astype(np.float64)
     return [((x + 0.5) / PX_PER_MM, (y + 0.5) / PX_PER_MM) for x, y in pts]
 
 
 def mask_to_polygons(mask: np.ndarray) -> list[Polygon]:
-    """Trace a boolean mask (keeping holes) into simplified, valid polygons in mm."""
+    """Trace a boolean mask (keeping holes) into simplified, valid polygons in mm.
+
+    The mask is dilated by 1 px, traced with ``cv2.findContours(RETR_CCOMP)``
+    (outer boundaries plus their holes), made valid with ``buffer(0)`` and
+    simplified at ``SIMPLIFY_MM``. Holes under ``MIN_HOLE_MM2`` and parts
+    under ``MIN_PART_MM2`` are dropped.
+
+    Args:
+        mask: HxW bool mask of one color at ``PX_PER_MM``.
+
+    Returns:
+        Polygons in mm (possibly empty).
+    """
     # Grow 1 px so neighboring colors overlap slightly instead of leaving hairline seams.
     m = cv2.dilate(mask.astype(np.uint8), np.ones((3, 3), np.uint8))
     contours, hier = cv2.findContours(m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
@@ -67,13 +155,20 @@ def mask_to_polygons(mask: np.ndarray) -> list[Polygon]:
 
 
 def _edges(poly: Polygon):
+    """Yield every segment ``((x0, y0), (x1, y1))`` of the exterior and all holes."""
     for ring in [poly.exterior, *poly.interiors]:
         c = list(ring.coords)
         yield from zip(c, c[1:])
 
 
 def mostly_axis_aligned(poly: Polygon) -> bool:
-    """True when most of the outline (by length) runs horizontally or vertically."""
+    """True when most of the outline (by length) runs horizontally or vertically.
+
+    The outline is first simplified at 0.2 mm so pixel jaggies don't count.
+    An edge is aligned when it is within ``AXIS_TOL_DEG`` of 0 or 90 degrees;
+    the result is True when aligned edges make up at least ``AXIS_SHARE`` of
+    the total length. stitch_params uses it to give boxy shapes 45 degree rows.
+    """
     p = poly.simplify(0.2, preserve_topology=True)
     total = aligned = 0.0
     for (x0, y0), (x1, y1) in _edges(p):
@@ -89,7 +184,11 @@ def mostly_axis_aligned(poly: Polygon) -> bool:
 
 def long_axis_angle(poly: Polygon) -> int:
     """Angle of the minimum rotated rectangle's long side, in Ink/Stitch's convention
-    (degrees, counter-clockwise from horizontal as seen on screen), rounded to 5°."""
+    (degrees, counter-clockwise from horizontal as seen on screen), rounded to 5°.
+
+    Returns:
+        An int in 0..175. 0 when the rectangle is degenerate (not a Polygon).
+    """
     rect = poly.minimum_rotated_rectangle
     if not isinstance(rect, Polygon):
         return 0
@@ -102,6 +201,12 @@ def long_axis_angle(poly: Polygon) -> int:
 
 
 def is_thin_or_ring(poly: Polygon) -> bool:
+    """True when a shape should get contour fill instead of tatami.
+
+    Thin: area / perimeter below ``THIN_RATIO_MM`` (perimeter includes holes).
+    Ring: exactly one hole, covering more than ``RING_HOLE_SHARE`` of the
+    area inside the outer edge.
+    """
     if poly.length and poly.area / poly.length < THIN_RATIO_MM:
         return True
     if len(poly.interiors) == 1:
@@ -112,7 +217,26 @@ def is_thin_or_ring(poly: Polygon) -> bool:
 
 def stitch_params(poly: Polygon, light_on_dark: bool = False, pull_comp_mm: float = 0.0,
                   row_spacing_mm: float | None = None, underlay: bool = False) -> dict[str, str]:
-    """row_spacing_mm / underlay come from the fabric type (None = Ink/Stitch default)."""
+    """row_spacing_mm / underlay come from the fabric type (None = Ink/Stitch default).
+
+    Thin shapes and rings (``is_thin_or_ring``) get ``contour_fill`` with only
+    a row spacing. Everything else gets ``tatami_fill`` with an ``angle``
+    from ``long_axis_angle`` (45 instead of 0/90 for mostly axis-aligned
+    shapes), pull compensation, underlay and row spacing. Light thread on
+    dark fabric forces underlay (tatami only) and caps rows at 0.25 mm.
+
+    Args:
+        poly: The fill shape in mm.
+        light_on_dark: Light thread on dark fabric (decided in pipeline.py).
+        pull_comp_mm: Pull compensation; written only when > 0, tatami only.
+        row_spacing_mm: Fill density from the fabric type, or None.
+        underlay: Fabric type's ``fill_underlay`` setting (tatami only).
+
+    Returns:
+        Ink/Stitch params as strings, e.g. ``{"fill_method": "tatami_fill",
+        "angle": "45", "row_spacing_mm": "0.25"}``. Keys left out mean
+        Ink/Stitch's default.
+    """
     if is_thin_or_ring(poly):   # contour fill takes the fabric's density, but has no underlay
         params = {"fill_method": "contour_fill"}
         rs = min(row_spacing_mm or 0.25, 0.25) if light_on_dark else row_spacing_mm
@@ -136,7 +260,16 @@ def stitch_params(poly: Polygon, light_on_dark: bool = False, pull_comp_mm: floa
 
 
 def band(polys: list[Polygon], width_mm: float, outer_only: bool = False) -> list[Polygon]:
-    """A band of the given width just inside each polygon's edge (for outlines/borders)."""
+    """A band of the given width just inside each polygon's edge (for outlines/borders).
+
+    Args:
+        polys: Shapes in mm.
+        width_mm: Band width, measured inward (mitred corners).
+        outer_only: Ignore holes, so only the outer edge gets a band (design border).
+
+    Returns:
+        Band polygons; pieces under 0.2 mm² are dropped.
+    """
     out = []
     for p in polys:
         base = Polygon(p.exterior) if outer_only else p
@@ -157,7 +290,24 @@ LINE_PARAMS = {"stroke_method": "running_stitch", "running_stitch_length_mm": "2
 
 
 def split_thin(mask: np.ndarray) -> tuple[np.ndarray, list]:
-    """Split a color mask into (fill mask, centerlines of its thin line features)."""
+    """Split a color mask into (fill mask, centerlines of its thin line features).
+
+    A morphological open with a ``THIN_LINE_MM`` disk keeps what can hold a
+    fill; the rest is "thin". A thin connected piece counts as a line when the
+    mask's skeleton runs at least ``MIN_LINE_MM`` through it; shorter ones
+    (corner slivers) stay in the fill. The skeleton over the line pieces (plus
+    2 px past them, so lines reach the fills they touch) is traced, joined
+    into long runs and simplified at ``LINE_SIMPLIFY_MM``; runs under 0.6 mm
+    are dropped.
+
+    Args:
+        mask: HxW bool mask of one color at ``PX_PER_MM``.
+
+    Returns:
+        ``(fill_mask, lines)``: the mask without the line pieces, and a list
+        of shapely LineStrings in mm. When there are no lines the input mask
+        is returned as is.
+    """
     from shapely.geometry import LineString
     from skimage.morphology import skeletonize
 
@@ -188,7 +338,18 @@ def split_thin(mask: np.ndarray) -> tuple[np.ndarray, list]:
 
 def _join_chains(chains: list[list]) -> list[list]:
     """Link chains that meet at a junction into long continuous runs, so a line is
-    stitched in one go instead of jumping between its pieces."""
+    stitched in one go instead of jumping between its pieces.
+
+    Greedy: starting from the longest unused chain, keep appending any unused
+    chain that shares the run's current end (flipped if needed), then do the
+    same from the other end. Unlike ``_join_smooth`` the turn angle is ignored.
+
+    Args:
+        chains: Chains of (y, x) pixels from ``_trace``.
+
+    Returns:
+        Runs of (y, x) pixels; every chain is used exactly once.
+    """
     from collections import defaultdict
 
     ends = defaultdict(set)
@@ -216,10 +377,26 @@ def _join_chains(chains: list[list]) -> list[list]:
 
 
 def _trace(skel: np.ndarray) -> list[list[tuple[int, int]]]:
-    """Skeleton pixels -> chains between endpoints/junctions (closed loops included)."""
+    """Skeleton pixels -> chains between endpoints/junctions (closed loops included).
+
+    Pixels are 8-connected, but a diagonal step only counts when no
+    orthogonal pair of steps links the same two pixels, so a staircase isn't
+    read as a junction. Nodes are pixels with other than two neighbors (ends
+    and junctions). Every chain runs node to node; skeleton loops with no node
+    become one closed chain that starts and ends on the same pixel. Each
+    pixel-to-pixel step appears in exactly one chain.
+
+    Args:
+        skel: HxW bool skeleton.
+
+    Returns:
+        Chains as lists of (y, x) tuples, each at least two pixels long.
+        Isolated single pixels produce no chain.
+    """
     pts = set(zip(*np.nonzero(skel)))
 
     def nbrs(p):
+        """Neighbors of pixel ``p`` in the skeleton (see the diagonal rule above)."""
         y, x = p
         out = [q for q in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)) if q in pts]
         for dy, dx in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
@@ -234,6 +411,8 @@ def _trace(skel: np.ndarray) -> list[list[tuple[int, int]]]:
     seen: set = set()
 
     def walk(a, b):
+        """Follow the skeleton from ``a`` through ``b`` until a node or back at ``a``,
+        marking each step as seen; returns the chain of pixels."""
         chain = [a, b]
         seen.add((a, b)); seen.add((b, a))
         prev, cur = a, b
@@ -274,20 +453,52 @@ SATIN_EDGE_MM = 0.6        # leftover strips this close to a column are part of 
 
 
 class Satin:
-    """A satin column in mm: rails as equal-length point lists, its outline, median width."""
+    """A satin column in mm: rails as equal-length point lists, its outline, median width.
+
+    Attributes:
+        rail1: List of (x, y) mm points along one edge of the stroke.
+        rail2: The other edge, same length and direction, node ``i`` paired
+            with ``rail1[i]``. svg_out.py writes both as subpaths of one path.
+        width_mm: Median stroke width (used by ``satin_params`` for underlay).
+        poly: The column's outline (rail1 then rail2 reversed), the largest
+            piece after ``buffer(0)``. Used for previews, coverage, outline
+            bands and the design silhouette.
+    """
 
     def __init__(self, rail1: list, rail2: list, width_mm: float):
+        """Store the rails and build ``poly``.
+
+        Raises:
+            ValueError: If the outline is degenerate (no polygon area).
+        """
         self.rail1, self.rail2, self.width_mm = rail1, rail2, width_mm
         self.poly = max(polygons(Polygon(rail1 + rail2[::-1]).buffer(0)), key=lambda p: p.area)
 
     def translated(self, dx: float, dy: float) -> "Satin":
+        """A copy moved by (dx, dy) mm (pipeline.py uses it to center the design in the hoop)."""
         return Satin([(x + dx, y + dy) for x, y in self.rail1], [(x + dx, y + dy) for x, y in self.rail2],
                      self.width_mm)
 
 
 def satin_params(width_mm: float, pull_comp_mm: float = 0.0, row_spacing_mm: float | None = None,
                  underlay: bool = False, light_on_dark: bool = False) -> dict[str, str]:
-    """Zig-zag spacing follows the fabric's fill density (0.25 mm rows = the 0.4 mm default)."""
+    """Zig-zag spacing follows the fabric's fill density (0.25 mm rows = the 0.4 mm default).
+
+    Center-walk underlay is always on; contour underlay from 2 mm wide;
+    zig-zag underlay from 3 mm wide when the fabric (or light-on-dark) asks
+    for underlay. Light thread on dark fabric caps the spacing at 0.4 mm and
+    turns underlay on.
+
+    Args:
+        width_mm: The column's ``Satin.width_mm``.
+        pull_comp_mm: Pull compensation; written only when > 0.
+        row_spacing_mm: The fabric's fill row spacing, or None for standard.
+        underlay: The fabric type's underlay setting.
+        light_on_dark: Light thread on dark fabric.
+
+    Returns:
+        Ink/Stitch params as strings, starting with ``satin_column="true"``.
+    """
     spacing = SATIN_SPACING_MM * (row_spacing_mm or 0.25) / 0.25
     if light_on_dark:
         spacing, underlay = min(spacing, SATIN_SPACING_MM), True
@@ -300,7 +511,29 @@ def satin_params(width_mm: float, pull_comp_mm: float = 0.0, row_spacing_mm: flo
 
 
 def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
-    """Split a color mask into (what's left to fill, satin columns)."""
+    """Split a color mask into (what's left to fill, satin columns).
+
+    Steps:
+      1. Skeletonize the mask, trace it into chains and drop spurs (short
+         twigs from a free tip, shorter than 1.5x their largest half-width).
+      2. Join chains into smooth runs (``_join_smooth``). Stroke width along a
+         run is twice the distance transform, median-smoothed over 9 pixels.
+      3. Every stretch whose width stays within ``SATIN_MIN_MM``..``SATIN_MAX_MM``
+         and is at least ``SATIN_MIN_LEN`` widths long becomes a ``_column``.
+         A column is rejected if more than ``SATIN_MAX_SPILL`` of it falls
+         outside the mask (grown by 1 px).
+      4. The fill remainder is the mask minus a ``SATIN_EDGE_MM`` margin around
+         the columns, keeping pieces of at least 0.5 mm², grown back so they
+         tuck 0.3 mm under the columns (see the comment below).
+
+    Args:
+        mask: HxW bool mask of one color at ``PX_PER_MM``. In pipeline.py
+            this is already the fill mask returned by ``split_thin``.
+
+    Returns:
+        ``(fill_mask, satins)``. With no columns the input mask is returned
+        unchanged with an empty list.
+    """
     from collections import Counter
     from skimage.morphology import skeletonize
 
@@ -312,6 +545,7 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
     ends = Counter(p for c in chains for p in (c[0], c[-1]))
 
     def spur(c):   # a short twig off a corner of a wide area, left by the skeleton
+        """True for a non-loop chain with a free tip that is shorter than 1.5x its max half-width (px)."""
         tip = ends[c[0]] == 1 or ends[c[-1]] == 1
         return tip and c[0] != c[-1] and len(c) < 1.5 * float(max(dist[y, x] for y, x in c))
     chains = [c for c in chains if not spur(c)]
@@ -321,7 +555,7 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
     covered = np.zeros_like(m8)
     out = []
     for run in _join_smooth(chains):
-        w = 2 * np.array([dist[y, x] for y, x in run])
+        w = 2 * np.array([dist[y, x] for y, x in run])   # distance to the edge is a half-width
         w = np.array([np.median(w[max(0, i - 4):i + 5]) for i in range(len(w))])
         ok = (w >= lo) & (w <= hi)
         i = 0
@@ -336,6 +570,7 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
             i = j
             if len(seg) < SATIN_MIN_LEN * float(np.median(ws)):
                 continue
+            # an end is a free tip only if this stretch reaches the run's end and nothing else meets there
             tips = (start == 0 and ends[run[0]] == 1, j == len(run) and ends[run[-1]] == 1)
             sat = _column(seg, ws, tips)
             if sat is None:
@@ -364,7 +599,21 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
 
 def line_satin(line, width_mm: float = LINE_SATIN_MM) -> Satin | None:
     """A thin feature's centerline -> a satin column of a steady width, so hairlines
-    match satin lettering instead of reading as a loose running-stitch thread."""
+    match satin lettering instead of reading as a loose running-stitch thread.
+
+    The line is resampled every ``SATIN_STEP_MM`` and offset by half the width
+    on each side along the local normal. Unlike ``_column`` the ends are not
+    extended or tapered.
+
+    Args:
+        line: A shapely LineString in mm (from ``split_thin``).
+        width_mm: Column width.
+
+    Returns:
+        A ``Satin``, or None when the line is shorter than 1 mm, too few node
+        pairs survive the fold-back filter, or the outline is degenerate. The
+        caller keeps rejected lines as running stitch.
+    """
     if line.length < SATIN_STEP_MM * 2:
         return None
     n = max(3, int(round(line.length / SATIN_STEP_MM)) + 1)
@@ -387,6 +636,11 @@ def line_satin(line, width_mm: float = LINE_SATIN_MM) -> Satin | None:
 
 
 def _fill_mm(mask: np.ndarray, poly: Polygon) -> None:
+    """Rasterize a mm polygon (holes left empty) into ``mask`` at ``PX_PER_MM``, in place, as 1s.
+
+    The -0.5 undoes the pixel-center offset used when tracing; coordinates
+    are passed with 3 fractional bits (``shift=3``) for sub-pixel accuracy.
+    """
     rings = [poly.exterior, *poly.interiors]
     pts = [np.round((np.asarray(r.coords) * PX_PER_MM - 0.5) * 8).astype(np.int32) for r in rings]
     cv2.fillPoly(mask, pts, 1, lineType=cv2.LINE_8, shift=3)
@@ -394,7 +648,24 @@ def _fill_mm(mask: np.ndarray, poly: Polygon) -> None:
 
 def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, False)) -> Satin | None:
     """Skeleton pixels + stroke widths (px) -> a satin column with paired rail nodes.
-    tips: which ends are a stroke's free end (tapered) rather than a junction (run in full)."""
+    tips: which ends are a stroke's free end (tapered) rather than a junction (run in full).
+
+    The pixel centerline is smoothed (7-point moving average), resampled every
+    ``SATIN_STEP_MM`` and offset by the local half-width (+ 0.5 px of overlap)
+    to make the rails. Each end is extended past the skeleton: by 0.8 of the
+    half-width and narrowed to 0.6 of it at a free tip, by a full half-width
+    at a junction. Node pairs that would fold back on a tight curve are dropped.
+
+    Args:
+        seg: Skeleton (y, x) pixels in order.
+        widths: Stroke width in px at each pixel of ``seg``.
+        tips: (start is a free tip, end is a free tip).
+
+    Returns:
+        A ``Satin`` whose ``width_mm`` is the median width, or None when the
+        centerline is under 1 mm, fewer than 3 node pairs survive, or the
+        outline is degenerate.
+    """
     xy = np.array([((x + 0.5) / PX_PER_MM, (y + 0.5) / PX_PER_MM) for y, x in seg])
     k = 7                                      # smooth the pixel staircase before taking tangents
     if len(xy) > k:
@@ -434,10 +705,23 @@ def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, Fal
 
 def _join_smooth(chains: list[list]) -> list[list]:
     """Join skeleton pieces that continue each other straight through a junction (turn
-    under SATIN_MAX_TURN_DEG), so a stroke is one column; sharp corners start a new one."""
+    under SATIN_MAX_TURN_DEG), so a stroke is one column; sharp corners start a new one.
+
+    Greedy: starting from the longest unused chain, at the run's end pick the
+    unused chain meeting there whose direction (taken over about 10 pixels)
+    turns least, if under the limit; repeat, then extend from the other end.
+    A run that closes into a loop stops growing.
+
+    Args:
+        chains: Chains of (y, x) pixels from ``_trace``.
+
+    Returns:
+        Runs of (y, x) pixels; every chain is used exactly once.
+    """
     from collections import defaultdict
 
     def heading(c, at_start):                 # direction leaving the chain's end, into the junction
+        """Unit (dy, dx) vector from about 10 pixels inside the chain to its start (or end) pixel."""
         pts = c if at_start else c[::-1]
         a, b = np.array(pts[min(len(pts) - 1, 10)]), np.array(pts[0])
         v = (b - a).astype(float)

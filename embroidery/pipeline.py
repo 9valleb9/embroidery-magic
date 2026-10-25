@@ -2,6 +2,51 @@
 
 Geometry depends only on (image, size, palette size, merges). Fabric color, hex
 edits, knockouts and stitch order are "color decisions" and never re-trace shapes.
+
+Where this sits in the flow::
+
+    upload -> raster.py rasterize -> palette.py colors + label map
+           -> vectorize.py shapes + stitch settings
+           -> pipeline.py (this module: sessions, color decisions, generation)
+           -> svg_out.py SVG -> export.py Ink/Stitch machine file
+
+``app.py`` is the FastAPI layer that calls into this module; ``static/index.html`` is
+the UI.
+
+Main entry points:
+    * ``new_session``: rasterize + analyze an upload once and cache the result.
+    * ``get_session``: fetch a cached session by id (``KeyError`` once expired).
+    * ``session_payload``: the JSON the UI gets back after analysis.
+    * ``build_plan``: fabric-aware color decisions (knockouts, merges, stitch order,
+      contrast warnings, thread list). Fast, no SVG.
+    * ``generate``: the full result: layers, overlap, stitch ordering, SVG, previews,
+      machine summary, fabric advice and warnings.
+
+Key concepts:
+    * Label map: a ``uint8`` array (H x W) at ``raster.PX_PER_MM`` (20 px/mm) where each
+      pixel holds a palette id (index into ``Session.hexes``). ``TRANSPARENT`` (255)
+      marks pixels with no design. Ids are small integers, so 256-entry lookup tables
+      (``lut[labels]``) are used to apply merges and re-numbering.
+    * Units: all geometry (shapely polygons, lines, satins, areas) is in mm, with the
+      origin at the design's top-left. Pixel quantities are converted with
+      ``PX_PER_MM``. The SVG canvas is the hoop, with the design centered on it.
+    * Color decisions vs geometry: merges, thin-line mode and satin mode change the
+      traced shapes, so they form the geometry cache key
+      ``(sorted merge mapping, thin_lines, satin)`` in ``Session._geom``. Everything
+      else (fabric color, hex edits, fabric overrides, order, outlines, border,
+      overlap, pull compensation, fabric type, hoop) is applied on top without
+      re-tracing.
+    * Fabric ids: colors decided to be "fabric" are not stitched; they stay as holes
+      in neighboring colors. ``TRANSPARENT`` is always treated as fabric too.
+
+Gotchas:
+    * Sessions are kept in memory only (``_SESSIONS``, LRU of ``_MAX_SESSIONS``). They
+      are lost on restart and are not shared between worker processes.
+    * The per-session geometry cache is never evicted; it lives as long as the session.
+    * ``build_plan`` returns an internal ``"_geom"`` key (a ``Geometry`` object).
+      Callers that serialize the plan must pop it first.
+    * Background removal crops and re-analyzes, so palette ids after ``new_session``
+      are not the ids of a plain analysis of the same image.
 """
 from __future__ import annotations
 
@@ -39,6 +84,19 @@ DEFAULT_PULL_COMP_MM = 0.2 # tatami rows stretched this far past each edge
 
 @dataclass
 class Geometry:
+    """Traced shapes for one geometry cache key (merge mapping, thin_lines, satin).
+
+    Attributes:
+        labels: Label map with merges applied (same shape as ``Session.labels``).
+        shapes: Color id -> fill polygons in mm (after thin lines / satins are split off).
+        lines: Color id -> centerlines in mm stitched as triple running stitch
+            (thin-line mode; empty lists otherwise).
+        satins: Color id -> satin columns (satin mode; empty lists otherwise).
+        area_mm2: Color id -> pixel area of that color in the merged label map, in mm².
+        adjacency: Color id -> neighbor id -> shared edge length in px, counted on
+            the merged label map. Includes ``TRANSPARENT`` as a key.
+        frame_label: Label covering at least half the image border, else ``None``.
+    """
     labels: np.ndarray                         # merged label map
     shapes: dict[int, list[Polygon]]
     lines: dict[int, list[LineString]]         # outline mode: thin features as centerlines
@@ -50,6 +108,20 @@ class Geometry:
 
 @dataclass
 class Session:
+    """One analyzed upload, cached in memory and addressed by ``id``.
+
+    Attributes:
+        id: Random hex id handed to the UI.
+        filename: Original upload name (app.py uses its stem for the export file name).
+        labels: Label map at ``PX_PER_MM`` (palette ids, ``TRANSPARENT`` for empty).
+        hexes: Palette colors as ``#rrggbb``; index = label id.
+        width_mm: Actual design width in mm (aspect kept inside the requested box).
+        height_mm: Actual design height in mm.
+        suggested_k: Palette size the analysis would choose automatically.
+        warnings: Analysis warnings (photo input, many colors, ...), shown with every plan.
+        background: ``{hex, share, removed}`` when an edge background was found.
+        _geom: Geometry cache, keyed by ``(sorted mapping items, thin_lines, satin)``.
+    """
     id: str
     filename: str
     labels: np.ndarray
@@ -62,6 +134,18 @@ class Session:
     _geom: dict = field(default_factory=dict)
 
     def geometry(self, mapping: dict[int, int], thin_lines: bool = True, satin: bool = False) -> Geometry:
+        """Return the traced geometry for these settings, building and caching it on first use.
+
+        Args:
+            mapping: Merge mapping, color id -> id it is merged into (already resolved
+                to final targets, see ``_resolve_merges``).
+            thin_lines: Split features under 1 mm into running-stitch centerlines.
+            satin: Split steady 1 to 7 mm strokes into satin columns.
+
+        Returns:
+            The cached ``Geometry``. Tracing is the slow step, so repeated plan calls
+            with the same merges are cheap.
+        """
         key = (tuple(sorted(mapping.items())), thin_lines, satin)
         if key not in self._geom:
             self._geom[key] = _build_geometry(self.labels, mapping, thin_lines, satin)
@@ -73,6 +157,11 @@ _MAX_SESSIONS = 6
 
 
 def get_session(sid: str) -> Session:
+    """Return a cached session and mark it most recently used.
+
+    Raises:
+        KeyError: If the session was evicted or never existed (for example after a restart).
+    """
     if sid not in _SESSIONS:
         raise KeyError("Session expired — drop the image again.")
     _SESSIONS.move_to_end(sid)
@@ -83,8 +172,33 @@ def get_session(sid: str) -> Session:
 
 def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
                 n_colors: int | None, remove_bg: str = "auto", sliver_mm: float = MORPH_DISK_MM) -> Session:
-    """remove_bg: "auto"/"on" remove a detected edge background, "off" keeps it.
-    sliver_mm: color bands narrower than this are absorbed into their neighbors."""
+    """Rasterize and analyze an upload, then cache it as a new session.
+
+    remove_bg: "auto"/"on" remove a detected edge background, "off" keeps it.
+    sliver_mm: color bands narrower than this are absorbed into their neighbors.
+
+    Args:
+        data: Raw file bytes (raster image or SVG).
+        filename: Upload name; its extension helps detect SVG input.
+        width_mm: Width of the box the design is fitted into, in mm.
+        height_mm: Height of the box the design is fitted into, in mm.
+        n_colors: Palette size, or ``None`` to let ``palette.analyze`` choose.
+        remove_bg: See above.
+        sliver_mm: See above.
+
+    Returns:
+        The new ``Session``. When a background is removed and the remaining subject is
+        noticeably smaller than the frame, the image is cropped to the subject and
+        re-rendered so the subject fills the requested size.
+
+    Raises:
+        ValueError: If removing the background leaves nothing to stitch (and whatever
+            ``rasterize`` / ``analyze`` raise for unreadable input).
+
+    Side effects:
+        Adds the session to ``_SESSIONS`` and evicts the oldest ones beyond
+        ``_MAX_SESSIONS``.
+    """
     rgb, alpha, w_mm, h_mm = rasterize(data, filename, width_mm, height_mm)
     res = analyze(rgb, alpha, n_colors, sliver_mm)
 
@@ -102,6 +216,7 @@ def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
         m = 2   # px of slack so anti-aliased edges aren't clipped
         x0, y0 = max(0, xs.min() - m), max(0, ys.min() - m)
         x1, y1 = min(W, xs.max() + 1 + m), min(H, ys.max() + 1 + m)
+        # Only re-render when the crop is worth it (subject clearly smaller than the frame).
         if (x1 - x0) < 0.98 * W or (y1 - y0) < 0.98 * H:
             # Crop to the subject so it fills the requested size, then re-analyze.
             rgb, alpha, w_mm, h_mm = rasterize(data, filename, width_mm, height_mm,
@@ -120,7 +235,20 @@ def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
 
 def _remove_background(res, bg_hex: str) -> None:
     """Edge-connected regions in the background color become empty (never stitched).
-    Same-colored areas enclosed by the design stay a normal thread color."""
+    Same-colored areas enclosed by the design stay a normal thread color.
+
+    Every palette color within ``C.KNOCKOUT_DE`` of ``bg_hex`` is cleared where it
+    touches the border. Colors left with no pixels are dropped and the remaining ids
+    are renumbered to stay contiguous.
+
+    Args:
+        res: The ``palette.analyze`` result; ``res.labels`` and ``res.hexes`` are
+            replaced in place.
+        bg_hex: Detected background color.
+
+    Raises:
+        ValueError: If no color is left.
+    """
     labels = res.labels
     for i, hx in enumerate(res.hexes):
         if C.delta_e(hx, bg_hex) < C.KNOCKOUT_DE:
@@ -129,6 +257,7 @@ def _remove_background(res, bg_hex: str) -> None:
     keep = [i for i in range(len(res.hexes)) if counts[i]]
     if not keep:
         raise ValueError("Removing the background left nothing to stitch.")
+    # Old id -> new contiguous id; anything not kept (incl. TRANSPARENT) maps to TRANSPARENT.
     lut = np.full(256, TRANSPARENT, np.uint8)
     for new, old in enumerate(keep):
         lut[old] = new
@@ -137,9 +266,18 @@ def _remove_background(res, bg_hex: str) -> None:
 
 
 def session_payload(s: Session) -> dict:
+    """Build the ``/api/analyze`` response for a session.
+
+    Returns:
+        A JSON-ready dict: session id, size in mm, suggested and actual palette size,
+        the palette (id, hex, area in mm², share of the design), default merges
+        (``auto_merge``), detected background, ``label_png`` (the label map as a
+        grayscale PNG data URL for live recoloring in the browser), analysis warnings
+        and stitch-mode recommendations.
+    """
     counts = np.bincount(s.labels.ravel(), minlength=256)
     px_mm2 = PX_PER_MM ** 2
-    total = float(counts[: len(s.hexes)].sum()) or 1.0
+    total = float(counts[: len(s.hexes)].sum()) or 1.0   # design pixels only, TRANSPARENT excluded
     return {
         "session_id": s.id,
         "width_mm": s.width_mm,
@@ -163,7 +301,16 @@ def recommend(s: Session, mapping: dict[int, int]) -> dict:
     """Stitch options that suit this image: satin when most of it is strokes under 7 mm wide
     (script, swashes, line art, borders), fills when it's mostly solid areas. Estimated at
     5 px/mm with a width test (what a 7 mm disk can't fit in is stroke), not the full satin
-    layout, so it stays fast. Thin-line outlines stay on: satin mode needs them for hairlines."""
+    layout, so it stays fast. Thin-line outlines stay on: satin mode needs them for hairlines.
+
+    Args:
+        s: The session.
+        mapping: Merge mapping to apply before measuring (usually the auto merges).
+
+    Returns:
+        ``{thin_lines, satin, satin_share, why}``: recommended toggles, the measured
+        stroke share (0 to 1) and a sentence explaining the choice for the UI.
+    """
     lut = np.arange(256, dtype=np.uint8)
     for src, dst in mapping.items():
         lut[src] = dst
@@ -175,6 +322,7 @@ def recommend(s: Session, mapping: dict[int, int]) -> dict:
         if i == TRANSPARENT:
             continue
         m = cv2.resize((labels == i).astype(np.uint8) * 255, None, fx=f, fy=f, interpolation=cv2.INTER_AREA) > 127
+        # Opening keeps only what a 7 mm disk fits inside; the rest is stroke-like.
         wide = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_OPEN, disk).astype(bool)
         stroke += int((m & ~wide).sum())
         total += int(m.sum())
@@ -187,7 +335,14 @@ def recommend(s: Session, mapping: dict[int, int]) -> dict:
 
 def _auto_merge(hexes: list[str], counts: np.ndarray) -> dict[int, int]:
     """Near-identical colors (ΔE2000 < 5) merge into the larger one by default:
-    on a single-needle machine every extra color is a manual thread change."""
+    on a single-needle machine every extra color is a manual thread change.
+
+    Colors are visited from largest to smallest pixel count, so a color always merges
+    into a bigger one that was kept.
+
+    Returns:
+        Color id -> id it merges into (only for merged colors).
+    """
     merged: dict[int, int] = {}
     keep: list[int] = []
     for i in sorted(range(len(hexes)), key=lambda i: -counts[i]):
@@ -200,12 +355,18 @@ def _auto_merge(hexes: list[str], counts: np.ndarray) -> dict[int, int]:
 
 
 def _png_data_url(img: np.ndarray) -> str:
+    """Encode an image array (grayscale or BGR) as a ``data:image/png;base64`` URL."""
     ok, buf = cv2.imencode(".png", img)
     return "data:image/png;base64," + base64.b64encode(buf.tobytes()).decode()
 
 
 def _label_png(labels: np.ndarray) -> str:
-    """Label indices as a grayscale PNG so the browser can recolor it live."""
+    """Label indices as a grayscale PNG so the browser can recolor it live.
+
+    Each pixel value is a label id (``TRANSPARENT`` = 255). The map is scaled down to at
+    most ``PREVIEW_MAX_PX`` on its long side with nearest-neighbor sampling, which never
+    invents ids that aren't in the map.
+    """
     h, w = labels.shape
     scale = min(1.0, PREVIEW_MAX_PX / max(h, w))
     small = cv2.resize(labels, (max(1, round(w * scale)), max(1, round(h * scale))),
@@ -217,6 +378,22 @@ def _label_png(labels: np.ndarray) -> str:
 
 def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines: bool,
                     satin: bool = False) -> Geometry:
+    """Trace the label map into mm geometry for one cache key (slow; use ``Session.geometry``).
+
+    Applies the merge mapping, then for each color: splits off thin features as
+    centerlines (``thin_lines``), splits off satin columns (``satin``) and traces what
+    remains into fill polygons. Also measures per-color area, pixel adjacency and the
+    frame label.
+
+    Args:
+        base_labels: The session's label map (not modified).
+        mapping: Resolved merge mapping, color id -> target id.
+        thin_lines: Enable running-stitch centerlines for features under 1 mm.
+        satin: Enable satin columns for steady 1 to 7 mm strokes.
+
+    Returns:
+        A new ``Geometry``.
+    """
     lut = np.arange(256, dtype=np.uint8)
     for src, dst in mapping.items():
         lut[src] = dst
@@ -242,6 +419,8 @@ def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines
     counts = np.bincount(labels.ravel(), minlength=256)
     area = {i: float(counts[i]) / PX_PER_MM ** 2 for i in ids}
 
+    # Count label changes between horizontal and vertical pixel neighbors. Each pair is
+    # packed into one int (a * 256 + b) so np.unique can count all pairs at once.
     adjacency: dict[int, dict[int, int]] = {i: {} for i in ids + [TRANSPARENT]}
     for a, b in ((labels[:, :-1], labels[:, 1:]), (labels[:-1, :], labels[1:, :])):
         diff = a != b
@@ -260,6 +439,13 @@ def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines
 
 
 def _resolve_merges(colors: list[dict]) -> dict[int, int]:
+    """Flatten ``merged_into`` chains (A -> B -> C becomes A -> C, B -> C).
+
+    Cycles are cut where they would revisit a color, so a bad request can't loop forever.
+
+    Returns:
+        Color id -> final target id, only for colors that are merged away.
+    """
     target = {c["id"]: c.get("merged_into") for c in colors}
     mapping = {}
     for cid in target:
@@ -277,7 +463,26 @@ def _resolve_merges(colors: list[dict]) -> dict[int, int]:
 def build_plan(s: Session, req: dict) -> dict:
     """Fabric-aware color decisions. req keys: fabric_hex, prev_fabric_hex, colors
     [{id, hex, fabric (None|bool override), merged_into, was_fabric, restored_from}],
-    order (list|None), outlines [ids], border (bool)."""
+    order (list|None), outlines [ids], border (bool).
+
+    Also reads ``thin_lines`` and ``satin`` (they select the cached geometry).
+
+    For each color that survives merging: decides fabric vs stitched (ΔE2000 under
+    ``C.KNOCKOUT_DE`` is fabric unless overridden), names its layer, flags restored
+    knockouts, light-on-dark thread and low contrast; picks the stitch order (user order
+    kept, missing ids appended); checks the design edge; and builds the thread list
+    including outline and border threads.
+
+    Args:
+        s: The session.
+        req: The plan request as a dict (``PlanIn.model_dump()``).
+
+    Returns:
+        A dict with ``colors`` (per-color decisions in stitch order), ``order``,
+        ``order_source`` ("user" or "auto"), ``outermost``, ``warnings``, ``summary``
+        (fabric, bobbin, threads) and ``_geom``, the internal ``Geometry``. Pop ``_geom``
+        before returning the plan as JSON.
+    """
     fabric = req.get("fabric_hex") or "#ffffff"
     prev_fabric = req.get("prev_fabric_hex")
     by_id = {c["id"]: c for c in req["colors"]}
@@ -297,6 +502,7 @@ def build_plan(s: Session, req: dict) -> dict:
         is_fabric = auto if override is None else bool(override)
         name = C.color_name(hx)
         restored = None if is_fabric else c.get("restored_from")
+        # Was auto-knocked-out on the previous fabric but stitches on this one.
         if (not is_fabric and override is None and c.get("was_fabric")
                 and prev_fabric and prev_fabric.lower() != fabric.lower()):
             restored = C.fabric_name(prev_fabric).lower()
@@ -399,7 +605,20 @@ def build_plan(s: Session, req: dict) -> dict:
 
 def suggest_order(stitched: list[int], decided: dict, geom: Geometry, fabric_ids: set[int]) -> list[int]:
     """Largest area first (the base), then colors touching the fabric and large areas,
-    with lighter colors ahead of darker ones wherever the two touch."""
+    with lighter colors ahead of darker ones wherever the two touch.
+
+    "Lighter" means more than 10 L* lighter; that rule is a strict order, so the
+    dependency graph has no cycles and a ready color always exists.
+
+    Args:
+        stitched: Ids of colors that are stitched (not fabric).
+        decided: Per-color decisions from ``build_plan`` (used for the hex).
+        geom: Geometry providing areas and adjacency.
+        fabric_ids: Ids treated as fabric, including ``TRANSPARENT``.
+
+    Returns:
+        The stitched ids in suggested order (fabric ids are not included).
+    """
     if not stitched:
         return []
     area = geom.area_mm2
@@ -424,6 +643,12 @@ def suggest_order(stitched: list[int], decided: dict, geom: Geometry, fabric_ids
 
 
 def _outermost(geom: Geometry, fabric_ids: set[int]) -> int | None:
+    """The color that forms the design's outside edge, or ``None`` if there is none.
+
+    A stitched frame label is the edge itself. Otherwise it is the color sharing the
+    longest pixel border with the frame label (or with ``TRANSPARENT`` when no label
+    dominates the frame).
+    """
     bg = geom.frame_label
     if bg is not None and bg not in fabric_ids:
         return bg                                   # a stitched background is the edge itself
@@ -437,6 +662,27 @@ def _outermost(geom: Geometry, fabric_ids: set[int]) -> int | None:
 # ---------------------------------------------------------------- generation
 
 def generate(s: Session, req: dict) -> dict:
+    """Build the full stitch-ready result for a plan request.
+
+    Steps: ``build_plan``; per stitched color, grow fills by the overlap and attach
+    stitch params (tatami/contour, satin, running-stitch lines); add outline and border
+    layers; number layers; order shapes within each layer to cut jumps; orient the hoop;
+    center the design on the hoop and write the SVG; render previews and run the
+    narrow-area / narrow-gap checks; add hoop-edge and fabric warnings.
+
+    Args:
+        s: The session.
+        req: The plan request dict. Besides the ``build_plan`` keys it reads
+            ``fabric_type``, ``pull_comp_mm``, ``overlap_mm``, ``hoop_w``, ``hoop_h``
+            and ``speed_spm``.
+
+    Returns:
+        The plan dict (without ``_geom``) plus ``fabric`` (before-you-stitch advice),
+        ``machine`` (thread changes, stitch/time/jump estimates, hoop), ``svg`` (text),
+        ``preview_png`` and ``preview_marked_png`` (data URLs), ``layers`` (per-layer
+        counts), ``width_mm`` / ``height_mm``, ``elapsed_s`` and the merged ``warnings``
+        (analysis + plan + machine + geometry).
+    """
     t0 = time.time()
     plan = build_plan(s, req)
     geom: Geometry = plan.pop("_geom")
@@ -478,11 +724,13 @@ def generate(s: Session, req: dict) -> dict:
         ring = band(polygons(sil), BORDER_MM, outer_only=True)
         layers.append({"label": f"{bw_name} border", "hex": bw_hex, "kind": "border",
                        "shapes": [(p, {"fill_method": "contour_fill"}) for p in ring]})
+    # Number layers in stitch order ("1 Dark green") so Ink/Stitch and the user see the order.
     for n, layer in enumerate(layers, 1):
         layer["label"] = f"{n} {layer['label']}"
     _order_shapes(layers, Point(s.width_mm / 2, s.height_mm / 2))
     hoop_w, hoop_h = M.oriented(s.width_mm, s.height_mm, *_hoop(req))
     speed = req.get("speed_spm") or M.DEFAULT_SPEED_SPM
+    # Tighter rows than standard mean proportionally more stitches per mm².
     density = F.STANDARD_ROW_SPACING_MM / (fab["row_spacing_mm"] or F.STANDARD_ROW_SPACING_MM)
     machine = _machine_summary(layers, speed, (hoop_w, hoop_h), density)
 
@@ -494,6 +742,7 @@ def generate(s: Session, req: dict) -> dict:
     meta = {**plan["summary"], "fabric_type": fab["label"], "stabilizer": fab["stabilizer"],
             "needle": fab["needle"]}
     svg = write_svg(hoop_w, hoop_h, placed, meta)
+    # Checks run on the unplaced layers, i.e. in design coordinates matching s.labels.
     preview, preview_marked, geo_warnings = _render_and_check(s, layers, fabric)
     if max(s.width_mm - hoop_w, s.height_mm - hoop_h) + 2 * pull > 0:
         geo_warnings.append({"level": "warn", "code": "hoop_edge",
@@ -519,20 +768,33 @@ def generate(s: Session, req: dict) -> dict:
 def _overlap(geom: Geometry, stitched: list[int], mm: float):
     """Each fill grows by `mm` into the stitched colors it touches, and into fabric gaps
     narrower than 2×mm (they'd close up anyway), so neighbors overlap instead of leaving
-    slivers of fabric between them. It never grows outward past the design's edge."""
+    slivers of fabric between them. It never grows outward past the design's edge.
+
+    Args:
+        geom: Geometry for the plan.
+        stitched: Ids of stitched colors (fabric colors don't count as design).
+        mm: Overlap distance in mm; 0 or less disables growth.
+
+    Returns:
+        A function mapping one fill polygon to its grown pieces (pieces under 0.2 mm²
+        are dropped; if nothing is left the original polygon is returned).
+    """
     if mm <= 0:
         return lambda p: [p]
     union = unary_union([p for cid in stitched for p in geom.shapes[cid]]
                         + [sat.poly for cid in stitched for sat in geom.satins[cid]])
+    # Closing = the design plus gaps narrower than 2*mm, but no further out than its edge.
     allowed = union.buffer(mm, join_style="round").buffer(-mm, join_style="round")   # closing
 
     def grow(p: Polygon) -> list[Polygon]:
+        """Grow one polygon by ``mm``, clipped to the closed design outline."""
         g = p.buffer(mm, join_style="round").intersection(allowed).buffer(0)
         return [q for q in polygons(g) if q.area >= 0.2] or [p]
     return grow
 
 
 def _hoop(req: dict) -> tuple[float, float]:
+    """Hoop (width, height) in mm from the request, falling back to the default hoop."""
     h = M.HOOPS[M.DEFAULT_HOOP]
     return float(req.get("hoop_w") or h["w"]), float(req.get("hoop_h") or h["h"])
 
@@ -541,7 +803,16 @@ def _order_shapes(layers: list[dict], start: Point) -> None:
     """Within each color, visit fills and outline lines in nearest-neighbor order,
     starting next to where the previous color finished, so stitching flows from a
     fill into the outline that touches it. Most home machines don't trim jumps, so
-    every remaining jump is a thread to cut by hand. Pure-fill colors get a 2-opt pass."""
+    every remaining jump is a thread to cut by hand. Pure-fill colors get a 2-opt pass.
+
+    Distances are shapely ``distance`` (closest points), measured from the previous
+    shape itself for fills and from the end point for lines. Lines may be reversed so
+    they start at the nearer end. The 2-opt pass is limited to 40 shapes per layer.
+
+    Args:
+        layers: Layers in stitch order; each layer's ``shapes`` list is replaced in place.
+        start: Where the machine starts (hoop center in design coordinates).
+    """
     cursor = start                        # the machine starts at hoop center
     for layer in layers:
         left = list(layer["shapes"])
@@ -567,6 +838,19 @@ def _order_shapes(layers: list[dict], start: Point) -> None:
 
 
 def _two_opt(route: list, start) -> list:
+    """Improve a fill visiting order with 2-opt (reverse sub-runs while it gets shorter).
+
+    The cost is an open path: distance from ``start`` to the first shape plus the gaps
+    between consecutive shapes. Distances are precomputed, so this is O(n²) memory and
+    roughly O(n³) per improving pass; callers keep n small.
+
+    Args:
+        route: ``(geometry, params)`` pairs.
+        start: Starting point (shapely geometry).
+
+    Returns:
+        The same pairs in the improved order.
+    """
     n = len(route)
     polys = [p for p, _ in route]
     d0 = [p.distance(start) for p in polys]
@@ -591,7 +875,22 @@ def _two_opt(route: list, start) -> list:
 def _fabric_advice(s: Session, fab: dict, pull: float, layers: list[dict], machine: dict,
                    geo_warnings: list[dict], hoop: tuple[float, float]) -> dict:
     """The "Before you stitch" box: what goes under and on top of the fabric, the stitch
-    settings the fabric type applied, and notes about this design on this fabric."""
+    settings the fabric type applied, and notes about this design on this fabric.
+
+    Args:
+        s: The session (for design size).
+        fab: Fabric type entry from ``fabrics``.
+        pull: Pull compensation in mm that was applied.
+        layers: Final layers (counted for lines and satins).
+        machine: ``_machine_summary`` result (for the stitch estimate).
+        geo_warnings: Geometry warnings so far; fabric limit warnings (beanie height,
+            stitch count) are appended to it in place.
+        hoop: Oriented hoop (w, h) in mm, used to suggest a bigger size.
+
+    Returns:
+        The ``fabric`` block for the response: key, label, stabilizer, needle, pull comp,
+        density label, underlay and notes.
+    """
     notes = list(fab["extras"])
     n_lines = sum("stroke_method" in p for l in layers for _, p in l["shapes"])
     narrow = any(w["code"] == "narrow_stitch" for w in geo_warnings)
@@ -607,6 +906,7 @@ def _fabric_advice(s: Session, fab: dict, pull: float, layers: list[dict], machi
     if n_satins:
         notes.append(f"{n_satins} stroke{'s' if n_satins != 1 else ''} stitch as satin. Satin can snag on "
                      "loopy or textured fabric, so use topping there.")
+    # The short side is the height that matters: the design can be turned to fit.
     if fab.get("max_height_mm") and min(s.width_mm, s.height_mm) > fab["max_height_mm"]:
         geo_warnings.append({"level": "warn", "code": "fabric_height",
                              "message": f"The design is {min(s.width_mm, s.height_mm):g} mm tall. A folded "
@@ -623,7 +923,23 @@ def _fabric_advice(s: Session, fab: dict, pull: float, layers: list[dict], machi
 
 def _machine_summary(layers: list[dict], speed: float, hoop: tuple[float, float], density: float = 1.0) -> dict:
     """Single-needle view: thread changes, estimated stitches and run time.
-    density: fill stitches relative to standard 0.25 mm rows (the fabric type's row spacing)."""
+    density: fill stitches relative to standard 0.25 mm rows (the fabric type's row spacing).
+
+    Consecutive layers with the same thread hex count as one block. A thread that comes
+    back later gets a ``color_revisit`` warning. Stitches are estimated from fill area
+    (``EST_STITCHES_PER_MM2`` x density) plus running-stitch length (triple run at 2 mm
+    per stitch), rounded to hundreds. Jumps are counted as shapes per layer minus one.
+
+    Args:
+        layers: Final, ordered layers.
+        speed: Machine speed in stitches per minute.
+        hoop: Oriented hoop (w, h) in mm, echoed back.
+        density: See above.
+
+    Returns:
+        Thread blocks/changes/hexes, estimated stitches, minutes and jumps, hoop, speed,
+        and ``warnings`` (the caller pops these into the main warning list).
+    """
     blocks: list[str] = []
     for layer in layers:
         if layer["shapes"] and (not blocks or blocks[-1] != layer["hex"]):
@@ -651,23 +967,55 @@ def _machine_summary(layers: list[dict], speed: float, hoop: tuple[float, float]
 
 
 def _fill(mask: np.ndarray, poly: Polygon) -> None:
+    """Rasterize a mm polygon (with holes) into ``mask`` at ``PX_PER_MM``, in place.
+
+    Coordinates are shifted by half a pixel (mm edges -> pixel centers) and passed with
+    3 fractional bits (``shift=3``) for sub-pixel accuracy. Holes are cut because all
+    rings go to one ``fillPoly`` call.
+    """
     rings = [poly.exterior, *poly.interiors]
     pts = [np.round((np.asarray(r.coords) * PX_PER_MM - 0.5) * 8).astype(np.int32) for r in rings]
     cv2.fillPoly(mask, pts, 1, lineType=cv2.LINE_8, shift=3)
 
 
 def _components(mask: np.ndarray, min_px: float) -> tuple[int, np.ndarray]:
+    """Keep 8-connected components of at least ``min_px`` pixels.
+
+    Returns:
+        (number of kept components, boolean mask of the kept components).
+    """
     n, cc, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
     keep = np.flatnonzero(stats[1:, cv2.CC_STAT_AREA] >= min_px) + 1
     return len(keep), np.isin(cc, keep)
 
 
 def _disk(mm: float) -> np.ndarray:
+    """Elliptical structuring element ``mm`` wide at ``PX_PER_MM`` (odd size, at least 3 px)."""
     d = max(3, round(mm * PX_PER_MM) | 1)
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))
 
 
 def _render_and_check(s: Session, layers: list[dict], fabric_hex: str):
+    """Paint the stitched preview and flag areas that won't stitch well.
+
+    Layers are painted in stitch order over the fabric color at the label map's
+    resolution (fills filled, lines drawn ``LINE_DRAW_MM`` wide). Two checks run on the
+    painted result:
+
+    * narrow stitch: parts of a fill layer a ``NARROW_STITCH_MM`` disk can't fit in
+      (components of at least 0.3 mm²), marked orange;
+    * narrow gap: uncovered fabric a ``NARROW_GAP_MM`` disk can't fit in (components
+      of at least 0.1 mm²), marked red.
+
+    Args:
+        s: The session (for the canvas size).
+        layers: Final layers in design coordinates (not yet centered on the hoop).
+        fabric_hex: Fabric color for the background.
+
+    Returns:
+        (preview PNG data URL, marked preview PNG data URL, list of warnings). Previews
+        are scaled to at most ``PREVIEW_MAX_PX`` on the long side.
+    """
     h, w = s.labels.shape
     img = np.empty((h, w, 3), np.uint8)
     img[:] = C.hex_to_rgb(fabric_hex)[::-1]          # BGR for OpenCV
@@ -709,6 +1057,7 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str):
                                     "when stitched (red on preview)."})
 
     scale = min(1.0, PREVIEW_MAX_PX / max(h, w))
+    # Dilate marks by about one preview pixel so they stay visible after downscaling.
     grow = np.ones((2 * int(1 / scale) + 1,) * 2, np.uint8)
     marked = img.copy()
     if thin_all.any():
@@ -718,6 +1067,7 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str):
         marked[cv2.dilate(gap_mask.astype(np.uint8), grow).astype(bool)] = (40, 30, 230)
 
     def small(a):
+        """Downscale an image to preview size (no-op when it's already small enough)."""
         return cv2.resize(a, (max(1, round(w * scale)), max(1, round(h * scale))),
                           interpolation=cv2.INTER_AREA) if scale < 1 else a
     return _png_data_url(small(img)), _png_data_url(small(marked)), warnings

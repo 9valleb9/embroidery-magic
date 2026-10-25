@@ -1,4 +1,47 @@
-"""Steps 2–3 — pick the thread palette with k-means and clean up the label map."""
+"""Steps 2–3 — pick the thread palette with k-means and clean up the label map.
+
+Where this sits in the flow:
+
+    upload -> raster.py (rasterize) -> palette.py (colors, label map)
+    -> vectorize.py (shapes, stitch settings) -> pipeline.py (sessions, color
+    decisions, generation) -> svg_out.py (Ink/Stitch SVG) -> export.py (machine file)
+
+This module reduces the rasterized RGB image to a handful of thread colors and
+produces a *label map*: an HxW uint8 array at ``raster.PX_PER_MM`` (20 px/mm)
+where each pixel holds a palette index ``0..k-1`` or ``TRANSPARENT`` (255) for
+"no design here". Everything downstream (pipeline.py's merges and fabric
+decisions, vectorize.py's per-color masks ``labels == i``) works on this map.
+
+Main entry points:
+    ``analyze(rgb, alpha, n_colors=None, sliver_mm=MORPH_DISK_MM)``: choose the
+        palette, label every pixel, clean up the map and flag photos.
+        Returns a ``PaletteResult``.
+    ``cleanup(labels, k, sliver_mm)``: the label-map clean-up on its own
+        (majority filter, per-color open/close, speck absorption).
+    ``frame_label`` and ``edge_connected``: used by pipeline.py for background
+        removal (which label fills the image edge, and which pixels of it are
+        connected to the edge).
+
+Key concepts:
+    * Colors are clustered in CIE Lab (``_to_lab``, L in 0..100), but only on
+      *flat* pixels (low local variance, fully opaque), so anti-aliased edge
+      pixels don't create in-between thread colors.
+    * k is picked as the fewest colors that represent every flat area, with
+      an error elbow as fallback; at most 8.
+    * Thread hexes are the mean RGB of each cluster's flat pixels, not the
+      Lab centroid, so they match the artwork better.
+    * Pixels with alpha < 128 get ``TRANSPARENT``.
+
+Gotchas:
+    * Do not median-blur a label map: a median over label ids can produce an
+      id that appears in neither neighbor. ``cleanup`` uses a mode filter.
+    * ``_UNASSIGNED`` (254) is a scratch value inside ``cleanup`` and never
+      leaves it. Palette indices are always below 8.
+    * Clean-up never leaves a gap: removed pixels are refilled from the
+      nearest surviving label (which may be ``TRANSPARENT``).
+    * k-means uses ``random_state=0`` and the sample uses a fixed seed, so the
+      same image gives the same palette.
+"""
 from __future__ import annotations
 
 import warnings
@@ -21,13 +64,23 @@ OFF_COLOR_SHARE = 0.005    # palette fits when fewer than this share of flat pix
 PHOTO_DISTINCT = 80        # distinct coarse colors that suggest a photo/gradient
 PHOTO_ERR = 6.0            # residual Lab error at 8 colors that suggests a photo/gradient
 
-MODE_KERNEL_PX = 9
+MODE_KERNEL_PX = 9         # majority-filter window (px), about 0.45 mm
 MORPH_DISK_MM = 0.35       # default sliver size: color bands narrower than this are absorbed
-MIN_PART_MM2 = 1.0
+MIN_PART_MM2 = 1.0         # connected specks of one color smaller than this are absorbed
 
 
 @dataclass
 class PaletteResult:
+    """What ``analyze`` returns.
+
+    Attributes:
+        labels: HxW uint8 label map, palette index or ``TRANSPARENT``, cleaned.
+        hexes: ``#rrggbb`` thread color per palette index (``hexes[i]`` is label ``i``).
+        suggested_k: The color count the analysis would pick on its own (shown
+            in the UI even when the user forced ``n_colors``).
+        warnings: UI warnings as ``{"level", "code", "message"}`` dicts
+            (codes ``photo`` and ``too_many_colors``).
+    """
     labels: np.ndarray          # HxW uint8, palette index or TRANSPARENT (already cleaned)
     hexes: list[str]
     suggested_k: int
@@ -41,7 +94,15 @@ def _to_lab(rgb: np.ndarray) -> np.ndarray:
 
 
 def _flat_mask(rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
-    """Pixels with low local variance — i.e. not on an anti-aliased edge."""
+    """Pixels with low local variance — i.e. not on an anti-aliased edge.
+
+    The variance is taken over a 5x5 window per RGB channel and the largest of
+    the three is compared with ``FLAT_VARIANCE``. Pixels must also be fully
+    opaque (alpha >= 250).
+
+    Returns:
+        HxW bool mask of flat pixels.
+    """
     var = np.zeros(rgb.shape[:2], np.float32)
     for c in range(3):
         ch = rgb[..., c].astype(np.float32)
@@ -51,7 +112,17 @@ def _flat_mask(rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
 
 
 def _fit(lab: np.ndarray, k: int) -> tuple[KMeans, float, float]:
-    """Returns (model, mean error, share of pixels with no close palette color)."""
+    """Fit k-means with ``k`` clusters to Lab samples.
+
+    Args:
+        lab: Nx3 float Lab samples.
+        k: Number of clusters.
+
+    Returns:
+        (model, mean error, share of pixels with no close palette color).
+        Error is the Lab distance to the nearest center; "no close color"
+        means farther than ``OFF_COLOR_DIST``.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         km = KMeans(n_clusters=k, n_init=3, random_state=0).fit(lab)
@@ -60,6 +131,10 @@ def _fit(lab: np.ndarray, k: int) -> tuple[KMeans, float, float]:
 
 
 def _assign(lab_px: np.ndarray, centers: np.ndarray, chunk: int = 1_000_000) -> np.ndarray:
+    """Index of the nearest center (squared Lab distance) for each of N pixels, as uint8.
+
+    Works in chunks of ``chunk`` pixels to bound the N x k distance array's memory.
+    """
     out = np.empty(len(lab_px), np.uint8)
     for i in range(0, len(lab_px), chunk):
         d = ((lab_px[i:i + chunk, None, :] - centers[None, :, :]) ** 2).sum(-1)
@@ -69,6 +144,26 @@ def _assign(lab_px: np.ndarray, centers: np.ndarray, chunk: int = 1_000_000) -> 
 
 def analyze(rgb: np.ndarray, alpha: np.ndarray, n_colors: int | None = None,
             sliver_mm: float = MORPH_DISK_MM) -> PaletteResult:
+    """Pick the thread palette, label every pixel and clean up the label map.
+
+    Steps: find flat pixels (falling back to all opaque pixels if fewer than
+    500 are flat), sample up to 30,000 of them, fit k-means in Lab for k from
+    2 to 8 (capped by the number of distinct sampled colors), suggest k, detect photo/gradient input, label all opaque pixels with
+    the nearest center, compute thread hexes from flat pixels, then ``cleanup``.
+
+    Args:
+        rgb: HxWx3 uint8 image from ``raster.rasterize``.
+        alpha: HxW uint8 alpha from ``raster.rasterize``.
+        n_colors: Force this many colors (clamped to 2..8, and to the number of
+            distinct sampled colors). None uses the suggested count.
+        sliver_mm: Width of color bands that ``cleanup`` absorbs into neighbors.
+
+    Returns:
+        A ``PaletteResult``.
+
+    Raises:
+        ValueError: If no pixel is at least half opaque.
+    """
     opaque = alpha >= 128
     if not opaque.any():
         raise ValueError("The image is fully transparent.")
@@ -143,16 +238,37 @@ def _fill_unassigned(labels: np.ndarray) -> np.ndarray:
         return labels
     if holes.all():
         return np.full_like(labels, TRANSPARENT)
+    # indices of the nearest non-hole pixel for every pixel, then copy its label
     _, (iy, ix) = ndi.distance_transform_edt(holes, return_indices=True)
     return labels[iy, ix]
 
 
 def _disk(diameter_px: int) -> np.ndarray:
+    """Elliptical structuring element, rounded up to an odd size of at least 3 px."""
     d = max(3, diameter_px | 1)
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))
 
 
 def cleanup(labels: np.ndarray, k: int, sliver_mm: float = MORPH_DISK_MM) -> np.ndarray:
+    """Clean a raw label map so every color forms stitchable regions.
+
+    Three passes, each of which treats ``TRANSPARENT`` as just another color:
+
+    1. A ``MODE_KERNEL_PX`` majority (mode) filter.
+    2. Per color, a morphological open then close with a ``sliver_mm`` disk.
+       A pixel keeps its color if that color survived there, else it takes a
+       color that closed over it, else the nearest assigned label.
+    3. Up to two rounds of absorbing connected specks under ``MIN_PART_MM2``
+       into the nearest surrounding label.
+
+    Args:
+        labels: HxW uint8 map of indices ``0..k-1`` and ``TRANSPARENT``.
+        k: Number of palette colors.
+        sliver_mm: Disk diameter in mm for step 2.
+
+    Returns:
+        A new cleaned label map (the input array is not modified).
+    """
     ids = list(range(k)) + [TRANSPARENT]
 
     # Majority (mode) filter. This is the label-safe form of a 9 px median blur:
@@ -201,7 +317,13 @@ def cleanup(labels: np.ndarray, k: int, sliver_mm: float = MORPH_DISK_MM) -> np.
 
 
 def frame_label(labels: np.ndarray) -> tuple[int | None, float]:
-    """The label covering most of the image's outer edge, if it covers at least half."""
+    """The label covering most of the image's outer edge, if it covers at least half.
+
+    Returns:
+        ``(label, share)``: the most common label on the one-pixel frame, or
+        None when it covers less than half of it, plus that label's share of
+        the frame (0..1) either way. Can be ``TRANSPARENT``.
+    """
     frame = np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
     vals, cnts = np.unique(frame, return_counts=True)
     top = int(cnts.argmax())
@@ -210,7 +332,14 @@ def frame_label(labels: np.ndarray) -> tuple[int | None, float]:
 
 
 def edge_connected(mask: np.ndarray) -> np.ndarray:
-    """Parts of a boolean mask that touch the image border (flood fill from the edges)."""
+    """Parts of a boolean mask that touch the image border (flood fill from the edges).
+
+    Uses 8-connected components; a component is kept whole if any of its
+    pixels lies on the border.
+
+    Returns:
+        HxW bool mask, a subset of ``mask``.
+    """
     n, cc = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
     edge = np.unique(np.concatenate([cc[0], cc[-1], cc[:, 0], cc[:, -1]]))
     edge = edge[edge != 0]

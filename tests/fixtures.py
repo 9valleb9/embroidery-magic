@@ -1,4 +1,21 @@
-"""Synthetic test inputs: a flat 3-color logo and a messy traced SVG."""
+"""Synthetic test inputs: a flat 3-color logo and a messy traced SVG.
+
+Every image is generated in code (no binary files in the repo), so the inputs
+are deterministic and each one targets specific pipeline behavior. The PNG
+fixtures are drawn at 4x and downsampled with Lanczos so their edges are
+anti-aliased like real exported art, which exercises palette clustering and
+sliver cleanup. Sizes quoted below assume the test's output size (about
+100 mm wide).
+
+    flat_logo_png      clean 3-color logo on white: the happy path
+    messy_traced_svg   an auto-trace full of junk: SVG cleanup
+    ringed_badge_png   white margin plus white interior: background removal
+    thin_outline_png   0.6 mm ring on transparent: thin lines and hairlines
+    script_stroke_png  3 mm stroke plus a disc: satin columns
+
+These are helpers, not tests; tests/test_pipeline.py and tests/test_export.py
+import them.
+"""
 from __future__ import annotations
 
 import base64
@@ -14,7 +31,21 @@ LIGHT_GREEN = "#8bc34a"
 
 def flat_logo_png(size: int = 600) -> bytes:
     """White background, dark green disc, light green ring + bar. Drawn at 4x and
-    downsampled so the edges are anti-aliased like a real exported logo."""
+    downsampled so the edges are anti-aliased like a real exported logo.
+
+    Concentric circles (dark green, light green ring, dark green center) with a
+    white bar across the middle. Detects as 3 colors (white, DARK_GREEN,
+    LIGHT_GREEN); on white fabric the white is knocked out, leaving two thread
+    layers whose colors touch. Used for the basic pipeline path, overlap and
+    pull compensation, knockout and restore on a fabric change, low-contrast
+    warnings and the machine summary.
+
+    Args:
+        size: output width and height in pixels.
+
+    Returns:
+        PNG bytes.
+    """
     s = size * 4
     img = Image.new("RGB", (s, s), "white")
     d = ImageDraw.Draw(img)
@@ -31,7 +62,23 @@ def flat_logo_png(size: int = 600) -> bytes:
 
 def messy_traced_svg(specks: int = 400, seed: int = 1) -> bytes:
     """Like an auto-trace: overlapping near-duplicate fills, hundreds of specks,
-    a stroked outline, a hidden layer and an embedded bitmap."""
+    a stroked outline, a hidden layer and an embedded bitmap.
+
+    On a 200 x 200 white canvas: an embedded PNG, a display:none red group and
+    an opacity 0 blue rect (none of which may reach the palette), a navy badge
+    traced as two near-identical navies (#1f2a44 and #202b46, which should
+    merge), a red stripe drawn only as a stroke (which must become a filled
+    shape), a gold star, and many tiny specks (design colors, white and near
+    variants) that cleanup must remove. The white margin is detected as
+    background. Expected result: 3 thread colors (navy, red, gold).
+
+    Args:
+        specks: number of speck circles to scatter.
+        seed: random seed, so the output is identical on every run.
+
+    Returns:
+        SVG bytes.
+    """
     rnd = random.Random(seed)
     tiny_png = base64.b64encode(flat_logo_png(16)).decode()
     parts = [
@@ -67,7 +114,18 @@ def messy_traced_svg(specks: int = 400, seed: int = 1) -> bytes:
 def ringed_badge_png(size: int = 600) -> bytes:
     """Crab-like case: a white margin around a black-ringed badge whose interior is
     also white, with a gold square inside. The margin is background; the white
-    interior is part of the design."""
+    interior is part of the design.
+
+    Exercises background removal: only the white region connected to the image
+    edge (found by flood fill) is removed and cropped away, while the same
+    white inside the black ring stays a thread color, e.g. to stitch on navy.
+
+    Args:
+        size: output width and height in pixels.
+
+    Returns:
+        PNG bytes.
+    """
     s = size * 4
     img = Image.new("RGB", (s, s), "white")
     d = ImageDraw.Draw(img)
@@ -81,7 +139,20 @@ def ringed_badge_png(size: int = 600) -> bytes:
 
 
 def thin_outline_png(size: int = 800) -> bytes:
-    """A gold disc with a ~0.6 mm black outline ring around it (at 100 mm), on transparent."""
+    """A gold disc with a ~0.6 mm black outline ring around it (at 100 mm), on transparent.
+
+    The ring is too thin to fill, so with thin_lines on it should become a
+    triple running stitch, with thin_lines off it should raise a narrow_stitch
+    warning, and in satin mode it should become a satin column widened to
+    1 mm. A 4 mm black bar across the middle is wide enough to stay a fill.
+    The transparent background also covers alpha handling.
+
+    Args:
+        size: output width and height in pixels.
+
+    Returns:
+        PNG bytes (RGBA).
+    """
     s = size * 4
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -95,7 +166,19 @@ def thin_outline_png(size: int = 800) -> bytes:
 
 
 def script_stroke_png(size: int = 800) -> bytes:
-    """A ~3 mm wide navy S-curve stroke (at 99 mm wide) and a solid 20 mm disc, on white."""
+    """A ~3 mm wide navy S-curve stroke (at 99 mm wide) and a solid 20 mm disc, on white.
+
+    Stands in for script lettering: the steady-width stroke should become a
+    satin column when satin is on (and makes /api/analyze recommend satin),
+    while the disc is too wide for satin and stays a fill. The image is twice
+    as wide as it is tall.
+
+    Args:
+        size: output width in pixels (the height is size // 2).
+
+    Returns:
+        PNG bytes.
+    """
     s = size * 4
     img = Image.new("RGB", (s, s // 2), "white")
     d = ImageDraw.Draw(img)
