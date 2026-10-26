@@ -577,6 +577,15 @@ def test_satin_column_geometry():
     for s in sats:
         if s is not thick:
             assert s.poly.intersection(thick.poly).area < 2 * s.width_mm      # tucks under the edge only
+
+    # a 2 mm arch that thins to 0.6 mm at its top stays one column (no fill left in the dip)
+    m = np.zeros((40 * PX_PER_MM, 40 * PX_PER_MM), np.uint8)
+    cv2.ellipse(m, (20 * PX_PER_MM, 25 * PX_PER_MM), (10 * PX_PER_MM, 15 * PX_PER_MM), 0, 180, 360, 1, 2 * PX_PER_MM)
+    lo, hi = int(19.4 * PX_PER_MM), int(20.6 * PX_PER_MM)                 # a 1.2 mm long dip
+    cv2.rectangle(m, (lo, 9 * PX_PER_MM), (hi, 11 * PX_PER_MM), 0, -1)
+    cv2.rectangle(m, (lo, 9 * PX_PER_MM), (hi, int(9.6 * PX_PER_MM)), 1, -1)
+    rest, sats = split_satin(m.astype(bool))
+    assert len(sats) == 1 and not rest.any()
     towel = satin_params(3.0, 0.3, 0.22, underlay=True)
     assert towel["zigzag_spacing_mm"] == "0.35" and towel["zigzag_underlay"] == "true"
     assert satin_params(1.5)["contour_underlay"] == "false"

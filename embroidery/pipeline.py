@@ -70,7 +70,7 @@ from .export import EST_STITCHES_PER_MM2, STITCH_WARN
 from .raster import PX_PER_MM, rasterize
 from .svg_out import write_svg
 from .vectorize import (LINE_PARAMS, Satin, band, line_satin, mask_to_polygons, polygons, satin_params,
-                        split_satin, split_thin, stitch_params)
+                        split_satin, split_strokes, split_thin, stitch_params)
 
 OUTLINE_MM = 1.0
 BORDER_MM = 1.0
@@ -409,6 +409,10 @@ def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines
             lines[i] = []
         if satin:
             mask, satins[i] = split_satin(mask)
+            # what the columns leave can still hold too-thin strokes (a 0.6 mm crossbar
+            # between its serifs): they'd scribble as fills, so they join the hairlines
+            mask, more = split_strokes(mask)
+            lines[i] = lines[i] + more
             # hairlines become 1 mm satin too, so they don't read as loose threads next to satin
             hair = [line_satin(ln) for ln in lines[i]]
             satins[i] += [h for h in hair if h is not None]

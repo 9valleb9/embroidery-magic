@@ -43,7 +43,9 @@ The three stitch modes:
    chains between junctions, ``_join_smooth`` joins chains that continue each
    other with less than ``SATIN_MAX_TURN_DEG`` of turn, and every stretch of
    steady ``SATIN_MIN_MM``..``SATIN_MAX_MM`` width becomes a ``Satin`` via
-   ``_column``. What the columns don't cover stays in the mask and is filled.
+   ``_column``. What the columns don't cover stays in the mask and is filled,
+   except pieces too thin on average to fill (``split_strokes``), which join
+   the hairlines below.
    In satin mode pipeline.py also passes each ``split_thin`` centerline to
    ``line_satin``, which turns hairlines into ``LINE_SATIN_MM`` (1 mm) satin
    columns so they match the lettering; lines it rejects stay running
@@ -336,6 +338,41 @@ def split_thin(mask: np.ndarray) -> tuple[np.ndarray, list]:
     return mask & ~line_mask, out
 
 
+def split_strokes(mask: np.ndarray) -> tuple[np.ndarray, list]:
+    """Split off whole pieces that are strokes too thin to fill, judged by average width.
+
+    ``split_thin`` judges pixel by pixel, so a thin stroke with a blob on it (a
+    0.6 mm crossbar whose serif corners are 1 mm across) breaks into bits too short
+    to be lines and stays a fill, which scribbles. Here a connected piece whose area
+    over skeleton length is under ``SATIN_MIN_MM`` and whose skeleton is at least
+    ``MIN_LINE_MM`` long becomes centerlines. Satin mode runs it on what
+    ``split_satin`` leaves, and the lines become ``line_satin`` columns.
+
+    Returns:
+        ``(fill_mask, lines)`` like ``split_thin``.
+    """
+    from shapely.geometry import LineString
+    from skimage.morphology import skeletonize
+
+    n, cc = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
+    if n < 2:
+        return mask, []
+    skel = skeletonize(mask)
+    area = np.bincount(cc.ravel(), minlength=n)
+    length = np.bincount(cc[skel], minlength=n)
+    ids = [i for i in range(1, n) if length[i] >= MIN_LINE_MM * PX_PER_MM
+           and area[i] < SATIN_MIN_MM * PX_PER_MM * length[i]]
+    if not ids:
+        return mask, []
+    strokes = np.isin(cc, ids)
+    out = []
+    for chain in _join_chains([c for c in _trace(skel & strokes) if len(c) >= 2]):
+        ls = LineString([((x + 0.5) / PX_PER_MM, (y + 0.5) / PX_PER_MM) for y, x in chain]).simplify(LINE_SIMPLIFY_MM)
+        if ls.length >= 0.6:
+            out.append(ls)
+    return mask & ~strokes, out
+
+
 def _join_chains(chains: list[list]) -> list[list]:
     """Link chains that meet at a junction into long continuous runs, so a line is
     stitched in one go instead of jumping between its pieces.
@@ -449,6 +486,7 @@ SATIN_MAX_TURN_DEG = 50    # skeleton pieces meeting straighter than this are on
 SATIN_MAX_SPILL = 0.08     # share of a column allowed outside the shape
 SATIN_SPACING_MM = 0.4     # Ink/Stitch's default zig-zag spacing
 LINE_SATIN_MM = 1.0        # in satin mode, hairlines are stitched as satin this wide
+SATIN_BRIDGE_MM = 3.0      # a column carries on through a thinner dip up to this long, at SATIN_MIN_MM
 SATIN_SLIVER_MM = 0.5      # leftovers narrower than this along a column are its edge, not a fill
 
 
@@ -561,6 +599,19 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
         w = 2 * np.array([dist[y, x] for y, x in run])   # distance to the edge is a half-width
         w = np.array([np.median(w[max(0, i - 4):i + 5]) for i in range(len(w))])
         ok = (w >= lo) & (w <= hi)
+        # a short thin dip between two good stretches (an arch thinning at its top) is
+        # bridged at the minimum width; breaking there would leave a fill in the dip
+        i = 0
+        while i < len(run):
+            if ok[i] or w[i] > hi:
+                i += 1
+                continue
+            j = i
+            while j < len(run) and not ok[j] and w[j] <= hi:
+                j += 1
+            if 0 < i and j < len(run) and ok[i - 1] and ok[j] and j - i <= SATIN_BRIDGE_MM * PX_PER_MM:
+                ok[i:j], w[i:j] = True, np.maximum(w[i:j], lo)
+            i = j
         i = 0
         while i < len(run):                    # each in-range stretch is a candidate column
             if not ok[i]:
@@ -575,7 +626,7 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
                 continue
             # an end is a free tip only if this stretch reaches the run's end and nothing else meets there
             tips = (start == 0 and ends[run[0]] == 1, j == len(run) and ends[run[-1]] == 1)
-            sat = _column(seg, ws, tips)
+            sat = _column(seg, ws, tips, mask)
             if sat is None:
                 continue
             pm = np.zeros_like(m8)
@@ -704,7 +755,8 @@ def _fill_mm(mask: np.ndarray, poly: Polygon) -> None:
     cv2.fillPoly(mask, pts, 1, lineType=cv2.LINE_8, shift=3)
 
 
-def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, False)) -> Satin | None:
+def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, False),
+            mask: np.ndarray | None = None) -> Satin | None:
     """Skeleton pixels + stroke widths (px) -> a satin column with paired rail nodes.
     tips: which ends are a stroke's free end (tapered) rather than a junction (run in full).
 
@@ -748,12 +800,15 @@ def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, Fal
         tan /= np.maximum(np.hypot(*tan.T), 1e-9)[:, None]
     # reach past the skeleton's ends, which stop about a half-width short of the stroke's
     # end (taper there) or of the junction's middle (run into it at full width)
+    nrm = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
+    rl, rr = (r, r) if mask is None else _edges_along(mask, c, nrm, r)
     reach = [0.8 if t else 1.0 for t in tips]
     c = np.vstack([c[0] - tan[0] * r[0] * reach[0], c, c[-1] + tan[-1] * r[-1] * reach[1]])
     tan = np.vstack([tan[0], tan, tan[-1]])
-    r = np.concatenate([[r[0] * (0.6 if tips[0] else 1.0)], r, [r[-1] * (0.6 if tips[1] else 1.0)]])
-    nrm = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
-    left, right = c + nrm * r[:, None], c - nrm * r[:, None]
+    nrm = np.vstack([nrm[0], nrm, nrm[-1]])
+    end = lambda v: np.concatenate([[v[0] * (0.6 if tips[0] else 1.0)], v, [v[-1] * (0.6 if tips[1] else 1.0)]])
+    rl, rr = end(rl), end(rr)
+    left, right = c + nrm * rl[:, None], c - nrm * rr[:, None]
     keep = [0]
     for i in range(1, len(c)):                # drop node pairs that fold back on a tight inner curve
         a = keep[-1]
@@ -767,6 +822,32 @@ def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, Fal
         return Satin(rail1, rail2, float(np.median(widths)) / PX_PER_MM)
     except ValueError:                         # degenerate outline
         return None
+
+
+def _edges_along(mask: np.ndarray, c: np.ndarray, nrm: np.ndarray, r: np.ndarray):
+    """Distance (mm) from each centerline node to the stroke's edge on each side, along the rung.
+
+    Rails offset symmetrically from the skeleton zig-zag unevenly wherever the skeleton
+    sits off center or the width estimate is noisy; measuring each side puts every rung
+    end on the real edge. A side that runs on (into a junction or another stroke) or
+    reads under half its expected reach keeps the symmetric estimate ``r``. The result
+    is median-smoothed over 5 nodes, plus 0.5 px of overlap like ``r``.
+    """
+    step = 0.5 / PX_PER_MM
+    reach = np.arange(0, SATIN_MAX_MM, step)
+    h, w = mask.shape
+    out = []
+    for sign in (1, -1):
+        pts = c[:, None, :] + sign * nrm[:, None, :] * reach[None, :, None]   # node x sample x (x, y)
+        px = np.clip(np.round(pts * PX_PER_MM - 0.5).astype(int), 0, [w - 1, h - 1])
+        inside = mask[px[..., 1], px[..., 0]]
+        first_out = np.where(inside.all(axis=1), len(reach), np.argmin(inside, axis=1))
+        d = reach[np.minimum(first_out, len(reach) - 1)] - step / 2 + 0.5 / PX_PER_MM
+        bad = (d > 1.5 * r) | (d < 0.5 * r)
+        d = np.where(bad, r, d)
+        d = np.array([np.median(d[max(0, i - 2):i + 3]) for i in range(len(d))])
+        out.append(d)
+    return out[0], out[1]
 
 
 def _join_smooth(chains: list[list]) -> list[list]:
