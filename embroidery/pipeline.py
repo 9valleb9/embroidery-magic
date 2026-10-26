@@ -70,7 +70,7 @@ from .export import EST_STITCHES_PER_MM2, STITCH_WARN
 from .raster import PX_PER_MM, rasterize
 from .svg_out import write_svg
 from .vectorize import (DOT_SPACING_MM, LINE_PARAMS, Satin, band, line_satin, mask_to_polygons, polygons, satin_params,
-                        split_dots, split_satin, split_strokes, split_thin, stitch_params)
+                        split_dots, space_tips, split_satin, split_strokes, split_thin, stitch_params)
 
 OUTLINE_MM = 1.0
 BORDER_MM = 1.0
@@ -422,6 +422,8 @@ def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines
         else:
             satins[i] = []
         shapes[i] = mask_to_polygons(mask)
+        if satins[i]:
+            satins[i] = space_tips(satins[i], shapes[i] + [ln.buffer(0.2) for ln in lines[i]], labels == i)
     counts = np.bincount(labels.ravel(), minlength=256)
     area = {i: float(counts[i]) / PX_PER_MM ** 2 for i in ids}
 

@@ -594,6 +594,17 @@ def test_satin_column_geometry():
     assert len(sats) == 1 and not rest[:, 10 * PX_PER_MM:30 * PX_PER_MM].any()
     assert min(math.dist(a, b) for a, b in zip(sats[0].rail1[2:-2], sats[0].rail2[2:-2])) >= 0.99
 
+    # two bars whose tips are 1 mm apart (neighboring serifs) are shortened to a gap
+    # that survives sewing; a bar joined to another at a junction keeps its end
+    from embroidery.vectorize import space_tips
+    m = np.zeros((20 * PX_PER_MM, 50 * PX_PER_MM), np.uint8)
+    cv2.rectangle(m, (5 * PX_PER_MM, 10 * PX_PER_MM), (20 * PX_PER_MM, int(11.5 * PX_PER_MM)), 1, -1)
+    cv2.rectangle(m, (21 * PX_PER_MM, 10 * PX_PER_MM), (36 * PX_PER_MM, int(11.5 * PX_PER_MM)), 1, -1)
+    _, sats = split_satin(m.astype(bool))
+    spaced = space_tips(sats, [], m.astype(bool))
+    assert len(spaced) == 2 and spaced[0].poly.distance(spaced[1].poly) >= 1.7
+    assert min(s.poly.bounds[0] for s in spaced) < 5.5 and max(s.poly.bounds[2] for s in spaced) > 35.5   # outer ends kept
+
     # an isolated 1.5 mm dot is one dense satin; a dot touching a column stays a fill
     from embroidery.vectorize import split_dots
     m = np.zeros((20 * PX_PER_MM, 20 * PX_PER_MM), np.uint8)

@@ -725,6 +725,82 @@ def split_dots(mask: np.ndarray, satins: list[Satin]) -> tuple[np.ndarray, list[
     return mask & ~np.isin(cc, drop), out
 
 
+SATIN_TIP_GAP_MM = 1.8     # satin tips closer than this to a separate shape are shortened
+
+
+def space_tips(sats: list[Satin], others: list, design: np.ndarray) -> list[Satin]:
+    """Shorten satin ends that nearly touch a separate shape, so the gap survives sewing.
+
+    A satin pushes out at its ends and thread spreads, so a 1 mm gap between two serif
+    tips sews shut and the serifs fuse into one bar. An end rung closer than
+    ``SATIN_TIP_GAP_MM`` to a shape that doesn't touch this column (another column,
+    a fill or a line) is moved back along the column: half the shortfall when the
+    neighbor is another column (it moves back too), all of it otherwise. A column is
+    never cut below a third of its length. Ends that touch another shape (junctions)
+    are left alone, and neighbors that the artwork joins (no fabric
+    between them in ``design``) are not gaps and are left alone.
+
+    Args:
+        sats: Columns of one color.
+        others: That color's fill polygons and lines (shapely, mm).
+        design: HxW bool mask of the color as drawn, at ``PX_PER_MM``.
+
+    Returns:
+        New list of columns, shortened where needed.
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import nearest_points
+
+    h, w = design.shape
+
+    def fabric_between(a, b) -> bool:
+        """True when some point on the straight path from a to b is fabric in the design."""
+        n = max(2, int(a.distance(b) * PX_PER_MM * 2))
+        for t in np.linspace(0, 1, n):
+            x, y = a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t
+            px, py = int(x * PX_PER_MM), int(y * PX_PER_MM)
+            if 0 <= px < w and 0 <= py < h and not design[py, px]:
+                return True
+        return False
+
+    shapes = [(sat.poly, True) for sat in sats] + [(g, False) for g in others]
+    out = []
+    for k, sat in enumerate(sats):
+        r1, r2 = np.array(sat.rail1), np.array(sat.rail2)
+        mid = (r1 + r2) / 2
+        seg = np.hypot(*np.diff(mid, axis=0).T)
+        s = np.concatenate([[0], np.cumsum(seg)])
+        if len(s) < 3 or s[-1] < 1.0:
+            out.append(sat)
+            continue
+        cut = [0.0, 0.0]
+        for e, idx in enumerate((0, -1)):
+            rung = LineString([tuple(r1[idx]), tuple(r2[idx])])
+            near = rung.buffer(0.15)
+            if any(j != k and g.intersects(near) for j, (g, _) in enumerate(shapes)):
+                continue                      # a junction end (tucked under a stroke), not a free tip
+            for j, (g, is_sat) in enumerate(shapes):
+                if j == k or g.intersects(sat.poly):
+                    continue
+                d = rung.distance(g)
+                if d < SATIN_TIP_GAP_MM and fabric_between(*nearest_points(rung, g)):
+                    cut[e] = max(cut[e], (SATIN_TIP_GAP_MM - d) * (0.5 if is_sat else 1.0))
+        if not any(cut):
+            out.append(sat)
+            continue
+        cap = s[-1] / 3
+        a, b = min(cut[0], cap), s[-1] - min(cut[1], cap)
+        keep = (s > a) & (s < b)
+        interp = lambda rail, t: (float(np.interp(t, s, rail[:, 0])), float(np.interp(t, s, rail[:, 1])))
+        n1 = [interp(r1, a)] + [tuple(map(float, p)) for p in r1[keep]] + [interp(r1, b)]
+        n2 = [interp(r2, a)] + [tuple(map(float, p)) for p in r2[keep]] + [interp(r2, b)]
+        try:
+            out.append(Satin(n1, n2, sat.width_mm, sat.dot) if len(n1) >= 3 else sat)
+        except ValueError:
+            out.append(sat)
+    return out
+
+
 def _clip_crossings(sats: list[Satin]) -> list[Satin]:
     """Where columns overlap, the bigger one runs through and the smaller one stops at its edge.
 
