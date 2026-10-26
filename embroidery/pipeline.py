@@ -69,8 +69,8 @@ from . import machines as M
 from .export import EST_STITCHES_PER_MM2, STITCH_WARN
 from .raster import PX_PER_MM, rasterize
 from .svg_out import write_svg
-from .vectorize import (LINE_PARAMS, Satin, band, line_satin, mask_to_polygons, polygons, satin_params,
-                        split_satin, split_strokes, split_thin, stitch_params)
+from .vectorize import (DOT_SPACING_MM, LINE_PARAMS, Satin, band, line_satin, mask_to_polygons, polygons, satin_params,
+                        split_dots, split_satin, split_strokes, split_thin, stitch_params)
 
 OUTLINE_MM = 1.0
 BORDER_MM = 1.0
@@ -413,6 +413,8 @@ def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines
             # between its serifs): they'd scribble as fills, so they join the hairlines
             mask, more = split_strokes(mask)
             lines[i] = lines[i] + more
+            mask, dots = split_dots(mask, satins[i])
+            satins[i] += dots
             # hairlines become 1 mm satin too, so they don't read as loose threads next to satin
             hair = [line_satin(ln) for ln in lines[i]]
             satins[i] += [h for h in hair if h is not None]
@@ -711,6 +713,7 @@ def generate(s: Session, req: dict) -> dict:
                   for prm in [stitch_params(p, d["light_on_dark"], pull, fab["row_spacing_mm"], fab["underlay"])]
                   for g in grow(p)]
         shapes += [(sat.poly, {**satin_params(sat.width_mm, pull, satin_rows, fab["underlay"], d["light_on_dark"]),
+                               **({"zigzag_spacing_mm": f"{DOT_SPACING_MM:g}"} if sat.dot else {}),
                                "_satin": sat}) for sat in geom.satins[cid]]
         shapes += [(ln, dict(LINE_PARAMS)) for ln in geom.lines[cid]]
         layers.append({"label": d["layer_name"], "hex": d["hex"], "shapes": shapes, "color_id": cid, "kind": "fill"})

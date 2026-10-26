@@ -486,6 +486,7 @@ SATIN_MAX_TURN_DEG = 50    # skeleton pieces meeting straighter than this are on
 SATIN_MAX_SPILL = 0.08     # share of a column allowed outside the shape
 SATIN_SPACING_MM = 0.4     # Ink/Stitch's default zig-zag spacing
 LINE_SATIN_MM = 1.0        # in satin mode, hairlines are stitched as satin this wide
+SATIN_NARROW_MM = 0.7      # strokes this wide up to SATIN_MIN_MM are widened to it
 SATIN_BRIDGE_MM = 3.0      # a column carries on through a thinner dip up to this long, at SATIN_MIN_MM
 SATIN_SLIVER_MM = 0.5      # leftovers narrower than this along a column are its edge, not a fill
 
@@ -498,24 +499,25 @@ class Satin:
         rail2: The other edge, same length and direction, node ``i`` paired
             with ``rail1[i]``. svg_out.py writes both as subpaths of one path.
         width_mm: Median stroke width (used by ``satin_params`` for underlay).
+        dot: Made by ``split_dots``; sewn denser (``DOT_SPACING_MM``).
         poly: The column's outline (rail1 then rail2 reversed), the largest
             piece after ``buffer(0)``. Used for previews, coverage, outline
             bands and the design silhouette.
     """
 
-    def __init__(self, rail1: list, rail2: list, width_mm: float):
+    def __init__(self, rail1: list, rail2: list, width_mm: float, dot: bool = False):
         """Store the rails and build ``poly``.
 
         Raises:
             ValueError: If the outline is degenerate (no polygon area).
         """
-        self.rail1, self.rail2, self.width_mm = rail1, rail2, width_mm
+        self.rail1, self.rail2, self.width_mm, self.dot = rail1, rail2, width_mm, dot
         self.poly = max(polygons(Polygon(rail1 + rail2[::-1]).buffer(0)), key=lambda p: p.area)
 
     def translated(self, dx: float, dy: float) -> "Satin":
         """A copy moved by (dx, dy) mm (pipeline.py uses it to center the design in the hoop)."""
         return Satin([(x + dx, y + dy) for x, y in self.rail1], [(x + dx, y + dy) for x, y in self.rail2],
-                     self.width_mm)
+                     self.width_mm, self.dot)
 
 
 def satin_params(width_mm: float, pull_comp_mm: float = 0.0, row_spacing_mm: float | None = None,
@@ -592,12 +594,17 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
     chains = [c for c in chains if not spur(c)]
 
     lo, hi = SATIN_MIN_MM * PX_PER_MM, SATIN_MAX_MM * PX_PER_MM
-    allowed = cv2.dilate(m8, np.ones((3, 3), np.uint8)).astype(bool)
+    # 3 px of slack: a stroke widened to SATIN_MIN_MM spills up to 0.15 mm per side
+    allowed = cv2.dilate(m8, np.ones((7, 7), np.uint8)).astype(bool)
     covered = np.zeros_like(m8)
     out = []
     for run in _join_smooth(chains):
         w = 2 * np.array([dist[y, x] for y, x in run])   # distance to the edge is a half-width
         w = np.array([np.median(w[max(0, i - 4):i + 5]) for i in range(len(w))])
+        # a stroke just under the minimum (a 0.9 mm serif bar) is sewn at the minimum,
+        # as hairlines are, rather than left to a fill too thin to hold
+        narrow = (w >= SATIN_NARROW_MM * PX_PER_MM) & (w < lo)
+        w = np.where(narrow, lo, w)
         ok = (w >= lo) & (w <= hi)
         # a short thin dip between two good stretches (an arch thinning at its top) is
         # bridged at the minimum width; breaking there would leave a fill in the dip
@@ -657,12 +664,74 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
     return mask & grown, out
 
 
+DOT_SPACING_MM = 0.25      # dots get only a few zig-zags; tighter spacing keeps them solid
+DOT_MAX_MM = 3.0           # an isolated blob up to this long is sewn as one satin (an i's dot)
+
+
+def split_dots(mask: np.ndarray, satins: list[Satin]) -> tuple[np.ndarray, list[Satin]]:
+    """Turn small isolated blobs (the dot of an i) into one satin each.
+
+    A contour fill on a 1 to 3 mm dot spirals into a web of short stitches; a single
+    satin across the dot is how dots are usually sewn. A blob qualifies when its
+    longest side is at most ``DOT_MAX_MM``, it is at least ``SATIN_MIN_MM`` across,
+    and it touches no satin column (junction leftovers stay fills). The column runs
+    along the blob's long axis with rungs across it, every half ``SATIN_STEP_MM``.
+
+    Returns:
+        ``(fill_mask, dot_satins)``.
+    """
+    from shapely.geometry import LineString
+
+    n, cc, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    out, drop = [], []
+    for i in range(1, n):
+        x, y, w, h = stats[i, :4]
+        if max(w, h) > DOT_MAX_MM * PX_PER_MM or min(w, h) < SATIN_MIN_MM * PX_PER_MM:
+            continue
+        cnts, _ = cv2.findContours((cc[y:y + h, x:x + w] == i).astype(np.uint8), cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_NONE)
+        cnt = max(cnts, key=cv2.contourArea) + np.array([x, y])
+        if len(cnt) < 5:
+            continue
+        poly = Polygon(_ring_mm(cnt)).buffer(0)
+        if poly.is_empty or any(poly.intersects(sat.poly) for sat in satins):
+            continue
+        (cx, cy), (rw, rh), ang = cv2.minAreaRect(cnt)
+        a = math.radians(ang if rw >= rh else ang + 90)
+        u = np.array([math.cos(a), math.sin(a)])               # long axis
+        v = np.array([-u[1], u[0]])
+        c = (np.array([cx, cy]) + 0.5) / PX_PER_MM
+        half = max(rw, rh) / PX_PER_MM / 2
+        r1, r2 = [], []
+        for t in np.arange(-half + SATIN_STEP_MM / 4, half, SATIN_STEP_MM / 2):
+            p = c + u * t
+            cut = poly.intersection(LineString([tuple(p - v * 5), tuple(p + v * 5)]))
+            if cut.is_empty or cut.geom_type != "LineString":
+                continue
+            (ax, ay), (bx, by) = cut.coords[0], cut.coords[-1]
+            if np.dot(np.array([bx - ax, by - ay]), v) < 0:
+                (ax, ay), (bx, by) = (bx, by), (ax, ay)
+            r1.append((float(ax), float(ay)))
+            r2.append((float(bx), float(by)))
+        if len(r1) < 3:
+            continue
+        try:
+            out.append(Satin(r1, r2, min(rw, rh) / PX_PER_MM, dot=True))
+        except ValueError:
+            continue
+        drop.append(i)
+    if not out:
+        return mask, []
+    return mask & ~np.isin(cc, drop), out
+
+
 def _clip_crossings(sats: list[Satin]) -> list[Satin]:
     """Where columns overlap, the bigger one runs through and the smaller one stops at its edge.
 
     Without this both columns sew across the overlap (a crossing, or a stroke running
     into another at a junction), stacking thread in two directions. Columns are taken
-    biggest first; a later column loses the rungs whose middle falls inside an earlier
+    biggest first, except that a column ending inside another (a stem under a serif
+    bar) comes after the ones it runs into; a later column loses the rungs whose middle falls inside an earlier
     one, keeping one rung past each cut so it tucks under the edge (at most
     ``SATIN_STEP_MM``) instead of leaving a seam. A column crossed in its middle splits
     into two. Pieces under 3 rungs or 1 mm long are dropped.
@@ -671,7 +740,12 @@ def _clip_crossings(sats: list[Satin]) -> list[Satin]:
     from shapely.prepared import prep
 
     kept: list[Satin] = []
-    for sat in sorted(sats, key=lambda s: -s.poly.area):
+    def ends_inside(s):
+        """How many of the column's two end rungs sit inside another column."""
+        ends = [Point((s.rail1[i][0] + s.rail2[i][0]) / 2, (s.rail1[i][1] + s.rail2[i][1]) / 2) for i in (0, -1)]
+        return sum(any(o is not s and o.poly.contains(e) for o in sats) for e in ends)
+
+    for sat in sorted(sats, key=lambda s: (ends_inside(s), -s.poly.area)):
         bigger = [prep(k.poly) for k in kept if k.poly.intersects(sat.poly)]
         if not bigger:
             kept.append(sat)
@@ -802,6 +876,8 @@ def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, Fal
     # end (taper there) or of the junction's middle (run into it at full width)
     nrm = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
     rl, rr = (r, r) if mask is None else _edges_along(mask, c, nrm, r)
+    short = np.maximum(0, SATIN_MIN_MM / 2 - (rl + rr) / 2)   # never narrower than the minimum
+    rl, rr = rl + short, rr + short
     reach = [0.8 if t else 1.0 for t in tips]
     c = np.vstack([c[0] - tan[0] * r[0] * reach[0], c, c[-1] + tan[-1] * r[-1] * reach[1]])
     tan = np.vstack([tan[0], tan, tan[-1]])
@@ -868,9 +944,14 @@ def _join_smooth(chains: list[list]) -> list[list]:
     from collections import defaultdict
 
     def heading(c, at_start):                 # direction leaving the chain's end, into the junction
-        """Unit (dy, dx) vector from about 10 pixels inside the chain to its start (or end) pixel."""
+        """Unit (dy, dx) vector from about 30 pixels inside the chain toward its start (or end).
+
+        The first few pixels are skipped: the skeleton curves into a junction over
+        about a half-width, which made a stem meeting a serif bar look like it carried
+        on into one half of the bar.
+        """
         pts = c if at_start else c[::-1]
-        a, b = np.array(pts[min(len(pts) - 1, 10)]), np.array(pts[0])
+        a, b = np.array(pts[min(len(pts) - 1, 30)]), np.array(pts[min(len(pts) - 1, 6) if len(pts) > 12 else 0])
         v = (b - a).astype(float)
         return v / max(np.hypot(*v), 1e-9)
 

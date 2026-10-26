@@ -542,7 +542,7 @@ def test_satin_column_geometry():
     import cv2
     import numpy as np
     from embroidery.raster import PX_PER_MM
-    from embroidery.vectorize import satin_params, split_satin
+    from embroidery.vectorize import Satin, satin_params, split_satin
 
     m = np.zeros((60 * PX_PER_MM, 80 * PX_PER_MM), np.uint8)
     pts = np.array([[(10 + t * 0.6) * PX_PER_MM, (30 + 12 * np.sin(t / 6)) * PX_PER_MM] for t in range(70)], np.int32)
@@ -586,6 +586,22 @@ def test_satin_column_geometry():
     cv2.rectangle(m, (lo, 9 * PX_PER_MM), (hi, int(9.6 * PX_PER_MM)), 1, -1)
     rest, sats = split_satin(m.astype(bool))
     assert len(sats) == 1 and not rest.any()
+
+    # a 0.9 mm bar (just under the minimum) is a satin widened to 1 mm, not a fill
+    m = np.zeros((20 * PX_PER_MM, 40 * PX_PER_MM), np.uint8)
+    cv2.rectangle(m, (5 * PX_PER_MM, 10 * PX_PER_MM), (35 * PX_PER_MM, int(10.9 * PX_PER_MM) - 1), 1, -1)
+    rest, sats = split_satin(m.astype(bool))
+    assert len(sats) == 1 and not rest[:, 10 * PX_PER_MM:30 * PX_PER_MM].any()
+    assert min(math.dist(a, b) for a, b in zip(sats[0].rail1[2:-2], sats[0].rail2[2:-2])) >= 0.99
+
+    # an isolated 1.5 mm dot is one dense satin; a dot touching a column stays a fill
+    from embroidery.vectorize import split_dots
+    m = np.zeros((20 * PX_PER_MM, 20 * PX_PER_MM), np.uint8)
+    cv2.circle(m, (10 * PX_PER_MM, 10 * PX_PER_MM), int(0.75 * PX_PER_MM), 1, -1)
+    rest, dots = split_dots(m.astype(bool), [])
+    assert len(dots) == 1 and dots[0].dot and not rest.any()
+    rest, dots = split_dots(m.astype(bool), [Satin([(9, 9), (9, 11), (9, 12)], [(11, 9), (11, 11), (11, 12)], 2)])
+    assert not dots and rest.any()
     towel = satin_params(3.0, 0.3, 0.22, underlay=True)
     assert towel["zigzag_spacing_mm"] == "0.35" and towel["zigzag_underlay"] == "true"
     assert satin_params(1.5)["contour_underlay"] == "false"
