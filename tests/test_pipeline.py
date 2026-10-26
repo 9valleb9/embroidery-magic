@@ -563,6 +563,20 @@ def test_satin_column_geometry():
     assert sats
     # along the bar's length (away from its square ends) nothing is left to fill
     assert not rest[:, 15 * PX_PER_MM:40 * PX_PER_MM].any()
+
+    # a thin stroke crossing a thick one: the thick column runs straight through and
+    # the thin one stops at its edge, so the crossing is sewn once
+    m = np.zeros((60 * PX_PER_MM, 60 * PX_PER_MM), np.uint8)
+    cv2.line(m, (30 * PX_PER_MM, 5 * PX_PER_MM), (30 * PX_PER_MM, 55 * PX_PER_MM), 1, 4 * PX_PER_MM)  # 4 mm
+    cv2.line(m, (8 * PX_PER_MM, 15 * PX_PER_MM), (52 * PX_PER_MM, 45 * PX_PER_MM), 1, 2 * PX_PER_MM)  # 2 mm
+    rest, sats = split_satin(m.astype(bool))
+    thick = max(sats, key=lambda s: s.width_mm)
+    assert thick.poly.bounds[3] - thick.poly.bounds[1] > 45                 # one column, top to bottom
+    rungs = [math.atan2(b[1] - a[1], b[0] - a[0]) for a, b in zip(thick.rail1, thick.rail2)]
+    assert max(abs(math.sin(r)) for r in rungs) < 0.1                     # rungs stay level through the crossing
+    for s in sats:
+        if s is not thick:
+            assert s.poly.intersection(thick.poly).area < 2 * s.width_mm      # tucks under the edge only
     towel = satin_params(3.0, 0.3, 0.22, underlay=True)
     assert towel["zigzag_spacing_mm"] == "0.35" and towel["zigzag_underlay"] == "true"
     assert satin_params(1.5)["contour_underlay"] == "false"

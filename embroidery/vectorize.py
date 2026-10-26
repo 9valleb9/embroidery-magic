@@ -522,6 +522,8 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
          and is at least ``SATIN_MIN_LEN`` widths long becomes a ``_column``.
          A column is rejected if more than ``SATIN_MAX_SPILL`` of it falls
          outside the mask (grown by 1 px).
+      3b. Where columns overlap, the smaller one is cut back to the bigger
+         one's edge (``_clip_crossings``).
       4. The fill remainder is what the columns don't cover, minus strips
          narrower than ``SATIN_SLIVER_MM`` (a column's edge), keeping pieces of
          at least 0.2 mm², grown 0.3 mm so they tuck under the columns (see the
@@ -581,10 +583,12 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
             area = int(pm.sum())
             if not area or (pm.astype(bool) & ~allowed).sum() > SATIN_MAX_SPILL * area:
                 continue
-            covered |= pm
             out.append(sat)
     if not out:
         return mask, []
+    out = _clip_crossings(out)
+    for sat in out:
+        _fill_mm(covered, sat.poly)
     # What's left is filled, judged by width rather than by closeness to a column:
     # - Strips between a column's rails and the shape's edge are hairline-thin (under
     #   SATIN_SLIVER_MM). Stitching them would sew a second layer over the satin's edge,
@@ -600,6 +604,50 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
     solid = np.isin(cc, keep).astype(np.uint8)
     grown = cv2.dilate(solid, disk(2 * 0.3)).astype(bool)
     return mask & grown, out
+
+
+def _clip_crossings(sats: list[Satin]) -> list[Satin]:
+    """Where columns overlap, the bigger one runs through and the smaller one stops at its edge.
+
+    Without this both columns sew across the overlap (a crossing, or a stroke running
+    into another at a junction), stacking thread in two directions. Columns are taken
+    biggest first; a later column loses the rungs whose middle falls inside an earlier
+    one, keeping one rung past each cut so it tucks under the edge (at most
+    ``SATIN_STEP_MM``) instead of leaving a seam. A column crossed in its middle splits
+    into two. Pieces under 3 rungs or 1 mm long are dropped.
+    """
+    from shapely.geometry import Point
+    from shapely.prepared import prep
+
+    kept: list[Satin] = []
+    for sat in sorted(sats, key=lambda s: -s.poly.area):
+        bigger = [prep(k.poly) for k in kept if k.poly.intersects(sat.poly)]
+        if not bigger:
+            kept.append(sat)
+            continue
+        mids = [Point((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in zip(sat.rail1, sat.rail2)]
+        inside = [any(k.contains(m) for k in bigger) for m in mids]
+        if not any(inside):
+            kept.append(sat)
+            continue
+        n, i = len(mids), 0
+        while i < n:                           # each stretch outside the bigger columns, plus one rung each side
+            if inside[i]:
+                i += 1
+                continue
+            j = i
+            while j < n and not inside[j]:
+                j += 1
+            a, b = max(0, i - 1), min(n, j + 1)
+            i = j
+            r1, r2 = sat.rail1[a:b], sat.rail2[a:b]
+            if len(r1) < 3 or math.dist(r1[0], r1[-1]) < 1.0:
+                continue
+            try:
+                kept.append(Satin(r1, r2, sat.width_mm))
+            except ValueError:
+                continue
+    return kept
 
 
 def line_satin(line, width_mm: float = LINE_SATIN_MM) -> Satin | None:
@@ -662,7 +710,8 @@ def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, Fal
 
     The pixel centerline is smoothed (7-point moving average), resampled every
     ``SATIN_STEP_MM`` and offset by the local half-width (+ 0.5 px of overlap)
-    to make the rails. Each end is extended past the skeleton: by 0.8 of the
+    to make the rails. The rung direction is averaged over about one stroke
+    width so a crossing stroke doesn't skew it. Each end is extended past the skeleton: by 0.8 of the
     half-width and narrowed to 0.6 of it at a free tip, by a full half-width
     at a junction. Node pairs that would fold back on a tight curve are dropped.
 
@@ -690,6 +739,13 @@ def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, Fal
     r = np.interp(t, s, widths) / PX_PER_MM / 2 + 0.5 / PX_PER_MM   # a hair of overlap with the edge
     tan = np.gradient(c, axis=0)
     tan /= np.maximum(np.hypot(*tan.T), 1e-9)[:, None]
+    # average the stitch angle over about one stroke width: where another stroke crosses,
+    # the skeleton jogs sideways and would skew the rungs into an X across the crossing
+    m = max(1, int(round(np.median(widths) / PX_PER_MM / SATIN_STEP_MM))) | 1
+    if m > 1 and len(tan) > m:
+        pad = np.pad(tan, ((m // 2, m // 2), (0, 0)), mode="edge")
+        tan = np.stack([np.convolve(pad[:, a], np.ones(m) / m, mode="valid") for a in (0, 1)], axis=1)
+        tan /= np.maximum(np.hypot(*tan.T), 1e-9)[:, None]
     # reach past the skeleton's ends, which stop about a half-width short of the stroke's
     # end (taper there) or of the junction's middle (run into it at full width)
     reach = [0.8 if t else 1.0 for t in tips]
