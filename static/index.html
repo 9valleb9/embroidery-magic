@@ -256,6 +256,24 @@
         bars) become satin columns, smooth and shiny like pro digitizing. Usually more stitches and a few more
         jumps to trim than fills.</span></label>
     <div class="hint" id="recHint" hidden></div>
+    <details class="stitch" id="letterBox" hidden>
+      <summary>Lettering: bolder strokes, dots, corner tips</summary>
+      <div class="hint" id="strokeStats" style="margin-top:8px"></div>
+      <div class="slider"><label for="bolder">Bolder</label><output id="bolderOut"></output>
+        <input type="range" id="bolder" min="0" max="0.6" step="0.05" value="0">
+        <div class="hint">Grows every shape outward by this much per side, for fabric that swallows thin strokes
+          (knits) or art made for print. Letters keep at least 0.8 mm between them, counters and the insides of
+          letters stay at least 1 mm open, and the design is scaled back to your size if it grows past it.</div></div>
+      <label class="hint" style="display:flex;gap:8px;align-items:flex-start;margin-top:10px;color:var(--ink)">
+        <input type="checkbox" id="repairDots" checked style="margin-top:2px">
+        <span><b>Round dots</b>: a dash or a crowded dot above an i or j is redrawn as a round dot with 1 mm of
+          space around it.</span></label>
+      <label class="hint" style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;color:var(--ink)">
+        <input type="checkbox" id="fillTips" style="margin-top:2px">
+        <span><b>Fill corner tips</b>: closes the points of sharp inside corners, which narrow to nothing and
+          can't be stitched. Never joins two shapes or shrinks a counter.</span></label>
+      <ul class="checks" id="letterNotes"></ul>
+    </details>
     <details class="stitch" id="stitchBox" hidden>
       <summary>Overlap &amp; pull compensation</summary>
       <div class="slider"><label for="overlap">Color overlap</label><output id="overlapOut"></output>
@@ -390,6 +408,8 @@ const state = {
   machine: { format: "pes", hoop: "4x4", hoopW: 100, hoopH: 100, speed: 400 },
   stitch: { overlap: 0.3, pull: 0.2, sliver: 0.35 },
   fabricType: "cotton",
+  letter: { bolder: 0, repairDots: true, fillTips: false },
+  labelUrl: null,        // the label map drawLive shows (the session's, or the plan's edited one)
 };
 const STITCH_DEFAULTS = { overlap: 0.3, pull: 0.2, sliver: 0.35 };
 
@@ -459,6 +479,7 @@ function planRequest() {
     hoop_w: state.machine.hoopW, hoop_h: state.machine.hoopH, format: state.machine.format,
     speed_spm: state.machine.speed, overlap_mm: state.stitch.overlap, pull_comp_mm: state.stitch.pull,
     fabric_type: state.fabricType,
+    bolder_mm: state.letter.bolder, repair_dots: state.letter.repairDots, fill_corner_tips: state.letter.fillTips,
   };
 }
 
@@ -488,6 +509,7 @@ function setFile(f) {
 }
 
 const EDGE_MM = 0.5;   // kept free at each hoop edge (pull compensation stitches past the design's edge)
+const FILL_MARGIN_MM = 1.5;   // the default size leaves this per edge: hoops shift a little while stitching
 /**
  * Whether a w x h design fits a hw x hh field, upright or turned 90 degrees (0.05 mm tolerance).
  * @returns {boolean}
@@ -552,7 +574,7 @@ async function analyze() {
       state.applyRecommend = false;
     }
     renderRecommend();
-    await loadLabels(s.label_png);
+    await loadLabels(s.label_png); state.labelUrl = s.label_png;
     await refreshPlan();
     $("generate").disabled = false;
   } catch (e) {
@@ -648,9 +670,12 @@ async function refreshPlan() {
     }
     // merged colors follow their target
     for (const c of state.colors) if (c.merged_into != null) c.was_fabric = null;
+    // bolder strokes / repaired dots change the shapes: preview the edited label map
+    const url = p.lettering?.label_png || state.session.label_png;
+    if (url !== state.labelUrl) { await loadLabels(url); state.labelUrl = url; }
     showError(null);
   } catch (e) { showError(e); }
-  renderThreads(); renderPlanWarnings(); drawLive(); markStale();
+  renderThreads(); renderLettering(); renderPlanWarnings(); drawLive(); markStale();
 }
 
 /**
@@ -678,6 +703,7 @@ function renderThreads() {
   $("thinBox").hidden = !p;
   $("satinBox").hidden = !p;
   $("stitchBox").hidden = !p;
+  $("letterBox").hidden = !p;
   if (!p) { ul.innerHTML = ""; return; }
   $("orderMode").textContent = p.order_source === "user" ? "custom order" : "suggested order";
   $("resetOrder").hidden = p.order_source !== "user";
@@ -841,7 +867,29 @@ document.addEventListener("click", (e) => {
   refreshPlan().then(() => { if (state.result) generate(); });
 });
 
+// ------------------------------------------------------------------ lettering
+/**
+ * Fill the Lettering box from the plan: stroke widths, the Bolder readout (mm and % of the
+ * median stroke), and what the shape fixes did or warn about.
+ */
+function renderLettering() {
+  const L = state.plan?.lettering;
+  const st = L?.stroke;
+  $("strokeStats").textContent = st ? `Stroke width: thinnest ${st.min} mm · typical ${st.median} mm · thickest ${st.max} mm` : "";
+  const v = state.letter.bolder;
+  $("bolderOut").textContent = v ? `+${v.toFixed(2)} mm per side` + (st ? ` (+${Math.round(200 * v / st.median)}% stroke)` : "") : "off";
+  $("letterNotes").innerHTML = L ? L.notes.map(n => `<li>${esc(n)}</li>`).join("")
+    + L.warnings.map(w => `<li class="bad">${esc(w)}</li>`).join("") : "";
+  if (L && L.warnings.length && !state.letterOpened) { $("letterBox").open = true; state.letterOpened = true; }
+}
+$("bolder").addEventListener("input", (e) => { state.letter.bolder = +e.target.value; renderLettering(); });
+$("bolder").addEventListener("change", () => refreshPlan());
+$("repairDots").addEventListener("change", (e) => { state.letter.repairDots = e.target.checked; refreshPlan(); });
+$("fillTips").addEventListener("change", (e) => { state.letter.fillTips = e.target.checked; refreshPlan(); });
+
 // ------------------------------------------------------------------ live preview
+/** Size of the design the live preview shows: the plan's edited shapes (bolder strokes) when there are any. */
+const liveSize = () => state.plan?.lettering?.label_png ? state.plan.lettering : state.session;
 /**
  * Draw the live preview canvas: the fabric-colored hoop field (turned to match the
  * design when that's how it fits), the label map recolored through a palette-id lookup table
@@ -853,7 +901,7 @@ function drawLive() {
   if (!state.labelData) { cv.hidden = true; return; }
   const { width, height, data } = state.labelData;
   // The canvas is the hoop's stitch field (turned to match the design), with the design centered on it.
-  const s = state.session, pxmm = width / s.width_mm;
+  const s = liveSize(), pxmm = width / s.width_mm;
   let [hw, hh] = [state.machine.hoopW, state.machine.hoopH];
   if ((s.width_mm > s.height_mm) !== (hw > hh) && hw !== hh && fits(s.width_mm, s.height_mm, hh, hw)) [hw, hh] = [hh, hw];
   cv.width = Math.max(width, Math.round(hw * pxmm)); cv.height = Math.max(height, Math.round(hh * pxmm));
@@ -897,7 +945,7 @@ function showTab(tab) {
     : tab === "stitchout" ? (state.export?.report?.preview_png || state.result.preview_png) : state.result.preview_png;
   $("stageBadge").hidden = !has;
   $("stageBadge").textContent = tab === "live" ? `live · on ${(state.plan?.summary.fabric_name || "fabric").toLowerCase()}`
-      + (state.session && state.liveHoop ? ` · design ${state.session.width_mm} × ${state.session.height_mm} mm in ${state.liveHoop[0]} × ${state.liveHoop[1]} mm hoop (dashed)` : "")
+      + (state.session && state.liveHoop ? ` · design ${liveSize().width_mm} × ${liveSize().height_mm} mm in ${state.liveHoop[0]} × ${state.liveHoop[1]} mm hoop (dashed)` : "")
     : tab === "problems" ? "red = gaps < 0.6 mm · orange = < 1 mm wide"
     : tab === "stitchout" ? `from the ${state.export?.report ? "." + state.export.report.format : "machine"} file · whole hoop · red = trim by hand` : "stitched shapes";
   $("stale").hidden = !(state.result && tab !== "live" && isStale());
@@ -1128,7 +1176,7 @@ function setHoop(w, h) {
   m.hoopW = w; m.hoopH = h; saveMachine();
   // new hoop: fill it, turned to match the image (wide logo, landscape box); aspect ratio is kept inside
   const wide = state.session && state.session.width_mm > state.session.height_mm;
-  const [a, b] = [w - 2 * EDGE_MM, h - 2 * EDGE_MM];
+  const [a, b] = [w - 2 * FILL_MARGIN_MM, h - 2 * FILL_MARGIN_MM];
   $("w").value = wide ? Math.max(a, b) : Math.min(a, b);
   $("h").value = wide ? Math.min(a, b) : Math.max(a, b);
   renderMachinePickers();
@@ -1167,7 +1215,7 @@ fetch("/api/machine").then(r => r.json()).then(m => {
   if (!MACHINE.formats[state.machine.format]) state.machine.format = m.default_format;
   if (!MACHINE.fabrics?.[state.fabricType]) state.fabricType = m.default_fabric;
   renderMachinePickers(); renderFabricType(); renderStitchSliders();
-  $("w").value = state.machine.hoopW - 2 * EDGE_MM; $("h").value = state.machine.hoopH - 2 * EDGE_MM;
+  $("w").value = state.machine.hoopW - 2 * FILL_MARGIN_MM; $("h").value = state.machine.hoopH - 2 * FILL_MARGIN_MM;
 }).catch(() => {});
 
 /**

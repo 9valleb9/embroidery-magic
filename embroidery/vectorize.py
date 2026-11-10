@@ -527,6 +527,12 @@ class Satin:
         self.rail1, self.rail2, self.width_mm, self.dot = rail1, rail2, width_mm, dot
         self.poly = max(polygons(Polygon(rail1 + rail2[::-1]).buffer(0)), key=lambda p: p.area)
 
+    def scaled(self, f: float) -> "Satin":
+        """A copy scaled by ``f`` about the origin (pipeline.py fits a grown design back
+        into its box)."""
+        return Satin([(x * f, y * f) for x, y in self.rail1], [(x * f, y * f) for x, y in self.rail2],
+                     self.width_mm * f, self.dot)
+
     def translated(self, dx: float, dy: float) -> "Satin":
         """A copy moved by (dx, dy) mm (pipeline.py uses it to center the design in the hoop)."""
         return Satin([(x + dx, y + dy) for x, y in self.rail1], [(x + dx, y + dy) for x, y in self.rail2],
@@ -680,10 +686,14 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
     for i in range(1, n):
         if stats[i, cv2.CC_STAT_AREA] < SATIN_KEEP_BIT_MM2 * PX_PER_MM ** 2:
             continue
-        ys, xs = np.nonzero(cc == i)
+        x, y, w, h = stats[i, :4]
+        if max(w, h) > 2 * SATIN_KEEP_BIT_LONG_MM * PX_PER_MM:
+            continue
+        box = cc[y:y + h, x:x + w] == i
+        ys, xs = np.nonzero(box)
         (_, _), (rw, rh), _ = cv2.minAreaRect(np.stack([xs, ys], axis=1).astype(np.float32))
         if max(rw, rh) <= SATIN_KEEP_BIT_LONG_MM * PX_PER_MM:
-            solid[cc == i] = 1
+            solid[y:y + h, x:x + w][box] = 1
     grown = cv2.dilate(solid, disk(2 * 0.3)).astype(bool)
     return mask & grown, out
 

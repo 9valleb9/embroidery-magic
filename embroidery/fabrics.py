@@ -23,6 +23,9 @@ Profile keys (all sizes in mm):
 - ``max_height_mm`` (optional): warn when the design's shorter side is taller than this
   (a beanie's folded cuff).
 - ``stitch_warn`` (optional): warn above this many estimated stitches.
+- ``min_stroke_mm``, ``min_gap_mm``, ``min_counter_mm`` (knits): thinnest stroke, fabric
+  gap and counter that survive on the fabric; the plan suggests Bolder below the first,
+  and Bolder keeps the other two.
 """
 from __future__ import annotations
 
@@ -31,21 +34,21 @@ FABRICS = {
                "stabilizer": "Tear-away", "needle": "75/11 sharp", "extras": []},
     "denim": {"label": "Denim / canvas", "pull_comp_mm": 0.2, "row_spacing_mm": None, "underlay": True,
               "stabilizer": "Heavy tear-away", "needle": "90/14 jeans", "extras": []},
-    "tshirt": {"label": "T-shirt knit", "pull_comp_mm": 0.35, "row_spacing_mm": 0.3, "underlay": True,
+    "tshirt": {"min_stroke_mm": 1.2, "min_gap_mm": 0.8, "min_counter_mm": 1.0, "label": "T-shirt knit", "pull_comp_mm": 0.35, "row_spacing_mm": 0.3, "underlay": True,
                "stabilizer": "Cut-away", "needle": "75/11 ballpoint",
                "extras": ["Hoop the shirt smooth but not stretched."]},
-    "polo": {"label": "Polo / piqué", "pull_comp_mm": 0.35, "row_spacing_mm": None, "underlay": True,
+    "polo": {"min_stroke_mm": 1.2, "min_gap_mm": 0.8, "min_counter_mm": 1.0, "label": "Polo / piqué", "pull_comp_mm": 0.35, "row_spacing_mm": None, "underlay": True,
              "stabilizer": "Cut-away", "needle": "75/11 ballpoint",
              "extras": ["Water-soluble topping keeps stitches from sinking into the knit texture."]},
-    "fleece": {"label": "Fleece / sweatshirt", "pull_comp_mm": 0.4, "row_spacing_mm": None, "underlay": True,
+    "fleece": {"min_stroke_mm": 1.2, "min_gap_mm": 0.8, "min_counter_mm": 1.0, "label": "Fleece / sweatshirt", "pull_comp_mm": 0.4, "row_spacing_mm": None, "underlay": True,
                "stabilizer": "Cut-away", "needle": "75/11 ballpoint",
                "extras": ["Water-soluble topping keeps stitches on top of the pile."]},
-    "beanie": {"label": "Beanie / knit hat (acrylic, polyester)", "pull_comp_mm": 0.4, "row_spacing_mm": None,
+    "beanie": {"min_stroke_mm": 1.2, "min_gap_mm": 0.8, "min_counter_mm": 1.0, "label": "Beanie / knit hat (acrylic, polyester)", "pull_comp_mm": 0.4, "row_spacing_mm": None,
                "underlay": True, "stabilizer": "Cut-away (no-show mesh)", "needle": "75/11 ballpoint",
                "extras": ["Water-soluble topping so stitches don't sink between the ribs.",
                           "Hoop the folded cuff flat without stretching it."],
                "max_height_mm": 55},
-    "performance": {"label": "Performance polyester (athletic, jerseys)", "pull_comp_mm": 0.3,
+    "performance": {"min_stroke_mm": 1.2, "min_gap_mm": 0.8, "min_counter_mm": 1.0, "label": "Performance polyester (athletic, jerseys)", "pull_comp_mm": 0.3,
                     "row_spacing_mm": 0.3, "underlay": True, "stabilizer": "No-show mesh cut-away",
                     "needle": "75/11 ballpoint",
                     "extras": ["Keep the design light: dense fills pucker thin, slippery polyester."],

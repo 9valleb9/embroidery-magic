@@ -7,15 +7,17 @@ through these modules, in this order:
    pixels-per-mm of the final design size.
 2. ``palette``: k-means palette in CIE Lab on flat pixels, a label map of every pixel's
    nearest palette color, label-map clean-up and photo/gradient detection.
-3. ``vectorize``: label masks to Shapely polygons (holes kept), stitch settings per shape
+3. ``lettering`` (optional): shape fixes on the label map: bolder strokes that keep
+   letters apart and counters open, round dots, filled corner tips.
+4. ``vectorize``: label masks to Shapely polygons (holes kept), stitch settings per shape
    (tatami or contour fill, angle, density, underlay, pull compensation), thin-line
    outlines, outline bands and satin columns.
-4. ``pipeline``: analysis sessions (geometry that is traced once), fabric-aware color
+5. ``pipeline``: analysis sessions (geometry that is traced once), fabric-aware color
    decisions (knockouts, merges, warnings, stitch order), shape ordering, previews and
    gap checks, and generation of the final SVG plus a machine summary.
-5. ``svg_out``: writes the Ink/Stitch-ready SVG (mm units, one layer per thread, the
+6. ``svg_out``: writes the Ink/Stitch-ready SVG (mm units, one layer per thread, the
    ``urn:embroidery-magic`` metadata block and the ``inkstitch_svg_version`` stamp).
-6. ``export``: runs the Ink/Stitch CLI in a background job to write the machine file
+7. ``export``: runs the Ink/Stitch CLI in a background job to write the machine file
    (.pes, .jef, .vp3, .exp, .xxx, .dst), then reads it back with pyembroidery to check
    it and to draw the stitch-out preview with the hand-trim map.
 

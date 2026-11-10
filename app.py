@@ -54,7 +54,7 @@ from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from embroidery import export, fabrics, machines, pipeline
 
@@ -111,6 +111,10 @@ class PlanIn(BaseModel):
     pull_comp_mm: float = pipeline.DEFAULT_PULL_COMP_MM   # Ink/Stitch pull compensation (tatami fills)
     overlap_mm: float = pipeline.DEFAULT_OVERLAP_MM       # how far each color reaches under its neighbors
     fabric_type: str = fabrics.DEFAULT_FABRIC             # sets row spacing + underlay; the UI also loads its pull comp
+    bolder_mm: float = Field(0.0, ge=0, le=1.5)           # grow every shape this much per side (lettering.py)
+    bolder_pct: float = Field(0.0, ge=0, le=200)          # or this % of the median stroke width
+    repair_dots: bool = True                              # redraw dashes / crowded dots above stems as round dots
+    fill_corner_tips: bool = False                        # fill the points of sharp inside corners
 
 
 def _session(sid: str) -> pipeline.Session:

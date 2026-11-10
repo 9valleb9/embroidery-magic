@@ -673,3 +673,19 @@ def test_corner_tips_and_small_fills():
     assert not is_thin_or_ring(box(0, 0, 1.5, 1.0))        # serif foot: tatami
     assert not is_thin_or_ring(box(0, 0, 4.2, 3.0))        # wedge where strokes meet: tatami
     assert is_thin_or_ring(box(0, 0, 10, 0.8))             # long thin strip: contour
+
+
+def test_bolder_lettering_through_the_api(client):
+    """Bolder strokes run through /api/plan and /api/generate: the plan reports stroke
+    widths and what changed (with an edited label map for the live preview), and the
+    generated design is scaled back into the requested box. A knit fabric suggests
+    Bolder when strokes are thinner than it holds."""
+    s = analyze(client, script_stroke_png(), "script.png")
+    knit = {**request(s), "fabric_type": "beanie"}
+    p = client.post("/api/plan", json=knit).json()
+    assert p["lettering"]["stroke"]["median"] > 0 and p["lettering"]["label_png"] is None
+    bold = {**request(s), "bolder_mm": 0.3}
+    p = client.post("/api/plan", json=bold).json()
+    assert any("bolder" in n for n in p["lettering"]["notes"]) and p["lettering"]["label_png"]
+    r = client.post("/api/generate", json=bold).json()
+    assert r["width_mm"] <= 99.05 and r["height_mm"] <= 99.05              # analyze() asked for 99 x 99

@@ -91,6 +91,17 @@ Sample inputs are in `samples/`: the mountain badge above, a flat 3-color logo, 
 - **Pull compensation** (set by the fabric type, max 0.5): written as Ink/Stitch's `pull_compensation_mm` on tatami fills. Each row of stitches is stretched this far past the shape's edge, because stitching pulls the fabric in. Moving the slider marks it *custom*; *reset to fabric* puts the fabric's value back, and picking a fabric type always does.
 - **Absorb slivers under** (default 0.35 mm): color bands narrower than this, such as anti-aliased rims around a shape or a hairline between two colors, are merged into the neighboring color during clean-up. Changing it re-analyzes the image. Set it too high and real thin lines disappear too.
 
+**Lettering** (thread panel): fixes for logos whose strokes are too thin for the fabric, applied to the traced shapes before stitching. It shows the design's stroke widths (thinnest, typical, thickest).
+
+- **Bolder** grows every shape outward by up to 0.6 mm per side. Knits swallow thin strokes and satin pulls in, so letters stitch thinner than the art; on knit fabric types the plan suggests a Bolder amount when strokes are under 1.2 mm. Growing is protected so the letters stay readable:
+  - each shape only grows into its own side of the gap to its neighbors, keeping at least 0.8 mm between letters (letters never merge);
+  - counters (the eye of an "e") and deep inside spaces (inside an "n", the notch between two serifs) keep a channel at least 1 mm wide; a counter already under 1 mm gets a 1 mm slot;
+  - a space that growing closes off (two feet meeting under an "n") is reopened with a straight channel down past the baseline;
+  - end caps that balloon into blobs are rebuilt as rounded rectangles as tall as their stroke;
+  - the number of separate shapes is checked afterwards, and the design is scaled back into your size if it grew past it (every check then runs on the scaled result).
+- **Round dots** (on by default): a dash, or a dot that crowds its stem, above an i or j is redrawn as a round dot 1.05 × the stem's width, centered over the stem with 1 mm of space around it.
+- **Fill corner tips**: closes the points of sharp inside corners, which narrow to nothing and can't be stitched, without joining shapes or shrinking a counter.
+
 ### Fabric types
 
 Picking a fabric type loads its pull compensation into the slider and writes its fill density (`row_spacing_mm`) onto every fill and its underlay (`fill_underlay`) onto tatami fills (Ink/Stitch's contour fill has no underlay). *Standard* density is Ink/Stitch's default 0.25 mm rows. The stabilizer, needle and extras appear in **Before you stitch** and are written to the SVG's metadata. These are common starting points, not measured stitch-outs: test on a scrap of the same fabric.
@@ -139,7 +150,7 @@ Built around the Brother SE400 (4×4 hoop, no jump trimming). Every format is ve
 | Vectorize | `cv2.findContours(RETR_CCOMP)` keeps holes. It drops parts under 1 mm² and holes under 0.8 mm², simplifies at 0.04 mm and fixes geometry with `buffer(0)`. Each color grows by 1 px so neighbors overlap slightly instead of leaving hairline seams. |
 | Fabric | Fabric-marked colors get no layer; they stay as holes in the neighboring colors. |
 | SVG | `width/height` in mm with a mm `viewBox`, inkscape + inkstitch namespaces, stamped `inkstitch_svg_version` 4 (Ink/Stitch 3.x parameter names; without it Ink/Stitch treats the file as legacy, rewrites its parameters and asks whether to update it), one layer per thread named `1 Dark green`, `2 Light green`, … in stitch order. Every shape is `fill-rule:evenodd; stroke:none`. |
-| Stitches | **Thin shapes or rings** (area ÷ perimeter < 1.2 mm, or one hole covering more than half the outline) get `inkstitch:fill_method="contour_fill"`. **Everything else** gets `tatami_fill`, with `inkstitch:angle` taken from the minimum rotated rectangle's long axis and rounded to 5°. Shapes whose edges are mostly horizontal or vertical get 45° instead of 0°/90°. All fills get the fabric type's `row_spacing_mm`; tatami shapes also get its `fill_underlay` and the pull compensation setting. With satin on, steady 1–7 mm strokes become `inkstitch:satin_column="true"` paths (two rails, equal node counts) with `zigzag_spacing_mm`, underlay and pull compensation, and the rest of the shape is filled as above. **Light thread (L\* > 70) on dark fabric (L\* < 35)** always gets `fill_underlay="true"` and rows no lighter than `row_spacing_mm="0.25"`. Everything else is left at Ink/Stitch defaults. |
+| Stitches | **Long thin shapes or rings** (area ÷ perimeter < 1.2 mm and at least 4 mm long and 2.5 × longer than wide, or one hole covering more than half the outline) get `inkstitch:fill_method="contour_fill"`; small or compact pieces get tatami, since contour fill spirals into a scribble on them. **Everything else** gets `tatami_fill`, with `inkstitch:angle` taken from the minimum rotated rectangle's long axis and rounded to 5°. Shapes whose edges are mostly horizontal or vertical get 45° instead of 0°/90°. All fills get the fabric type's `row_spacing_mm`; tatami shapes also get its `fill_underlay` and the pull compensation setting. With satin on, steady 1–7 mm strokes become `inkstitch:satin_column="true"` paths (two rails, equal node counts) with `zigzag_spacing_mm`, underlay and pull compensation, and the rest of the shape is filled as above. **Light thread (L\* > 70) on dark fabric (L\* < 35)** always gets `fill_underlay="true"` and rows no lighter than `row_spacing_mm="0.25"`. Everything else is left at Ink/Stitch defaults. |
 
 Angles use Ink/Stitch's convention: degrees, counter-clockwise from horizontal as seen on screen.
 
@@ -159,7 +170,10 @@ The fabric color, fabric type, stabilizer, needle, bobbin and thread list (fabri
 ### Warnings
 
 - Stitched areas narrower than 1 mm.
-- Fabric gaps narrower than 0.6 mm, which will likely close up (shown in red on the preview).
+- Fabric gaps narrower than 0.6 mm (0.8 mm on knits), which will likely close up (shown in red on the preview), each labeled as between two shapes or inside one.
+- Corner tips are listed separately as OK: the point of a sharp inside corner narrows to nothing by definition, so narrow areas shorter than 1 mm aren't counted as problems.
+- A design within 3 mm of the hoop's stitch field (hoops shift a little while stitching).
+- Strokes thinner than the fabric holds (knits: 1.2 mm), with a suggested Bolder amount.
 - More than 8 colors.
 - Photo or gradient input.
 - Low contrast, design edge, restored knockouts, and the light-on-dark adjustments.
@@ -181,6 +195,7 @@ app.py                  FastAPI server + `python app.py` entry point
 embroidery/raster.py    rasterize + SVG sanitizing
 embroidery/palette.py   k-means palette, label-map cleanup, photo detection
 embroidery/vectorize.py contours -> polygons, stitch settings, outline bands, satin columns
+embroidery/lettering.py bolder strokes (with gap / counter / pocket protection), dot repair, corner tips
 embroidery/colors.py    Lab / ΔE2000, thread names, bobbin, contrast swaps
 embroidery/pipeline.py  sessions, fabric decisions, stitch order, generation, preview + gap checks
 embroidery/svg_out.py   Ink/Stitch SVG writer

@@ -51,18 +51,20 @@ Gotchas:
 from __future__ import annotations
 
 import base64
+import math
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import cv2
 import numpy as np
-from shapely.affinity import translate
+from shapely.affinity import scale as scale_geom, translate
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from . import colors as C
+from . import lettering
 from . import fabrics as F
 from .palette import MORPH_DISK_MM, TRANSPARENT, analyze, edge_connected, frame_label
 from . import machines as M
@@ -98,6 +100,9 @@ class Geometry:
         adjacency: Color id -> neighbor id -> shared edge length in px, counted on
             the merged label map. Includes ``TRANSPARENT`` as a key.
         frame_label: Label covering at least half the image border, else ``None``.
+        width_mm, height_mm: Size of ``labels`` in mm. Bolder strokes can make it larger
+            than the session's design.
+        lettering: The ``lettering.Report`` when shape fixes were applied, else None.
     """
     labels: np.ndarray                         # merged label map
     shapes: dict[int, list[Polygon]]
@@ -106,6 +111,9 @@ class Geometry:
     area_mm2: dict[int, float]
     adjacency: dict[int, dict[int, int]]       # id -> neighbor id -> shared edge length (px)
     frame_label: int | None                    # label covering most of the image frame (>= 50%)
+    width_mm: float = 0.0
+    height_mm: float = 0.0
+    lettering: object = None                   # lettering.Report when shape fixes ran
 
 
 @dataclass
@@ -122,7 +130,9 @@ class Session:
         suggested_k: Palette size the analysis would choose automatically.
         warnings: Analysis warnings (photo input, many colors, ...), shown with every plan.
         background: ``{hex, share, removed}`` when an edge background was found.
-        _geom: Geometry cache, keyed by ``(sorted mapping items, thin_lines, satin)``.
+        box_mm: The (w, h) box the design was fitted into; bolder strokes are scaled
+            back to fit it.
+        _geom: Geometry cache, keyed by ``(sorted mapping items, thin_lines, satin, fixes)``.
     """
     id: str
     filename: str
@@ -133,9 +143,11 @@ class Session:
     suggested_k: int
     warnings: list[dict]
     background: dict | None = None             # {hex, share, removed} when an edge background was found
+    box_mm: tuple[float, float] | None = None
     _geom: dict = field(default_factory=dict)
 
-    def geometry(self, mapping: dict[int, int], thin_lines: bool = True, satin: bool = False) -> Geometry:
+    def geometry(self, mapping: dict[int, int], thin_lines: bool = True, satin: bool = False,
+                 fixes: "lettering.Fixes | None" = None) -> Geometry:
         """Return the traced geometry for these settings, building and caching it on first use.
 
         Args:
@@ -143,19 +155,24 @@ class Session:
                 to final targets, see ``_resolve_merges``).
             thin_lines: Split features under 1 mm into running-stitch centerlines.
             satin: Split steady 1 to 7 mm strokes into satin columns.
+            fixes: Shape fixes (bolder strokes, dot repair, corner tips) applied to the
+                label map before tracing, or None.
 
         Returns:
             The cached ``Geometry``. Tracing is the slow step, so repeated plan calls
             with the same merges are cheap.
         """
-        key = (tuple(sorted(mapping.items())), thin_lines, satin)
+        key = (tuple(sorted(mapping.items())), thin_lines, satin, fixes)
         if key not in self._geom:
-            self._geom[key] = _build_geometry(self.labels, mapping, thin_lines, satin)
+            self._geom[key] = _build_geometry(self.labels, mapping, thin_lines, satin, fixes)
+            while len(self._geom) > _MAX_GEOMS:             # bolder slider steps add up
+                self._geom.pop(next(iter(self._geom)))
         return self._geom[key]
 
 
 _SESSIONS: "OrderedDict[str, Session]" = OrderedDict()
 _MAX_SESSIONS = 6
+_MAX_GEOMS = 8                 # cached geometries per session
 
 
 def get_session(sid: str) -> Session:
@@ -228,7 +245,7 @@ def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
 
     s = Session(id=uuid.uuid4().hex, filename=filename, labels=res.labels, hexes=res.hexes,
                 width_mm=w_mm, height_mm=h_mm, suggested_k=res.suggested_k, warnings=res.warnings,
-                background=background)
+                background=background, box_mm=(width_mm, height_mm))
     _SESSIONS[s.id] = s
     while len(_SESSIONS) > _MAX_SESSIONS:
         _SESSIONS.popitem(last=False)
@@ -379,7 +396,7 @@ def _label_png(labels: np.ndarray) -> str:
 # ---------------------------------------------------------------- geometry
 
 def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines: bool,
-                    satin: bool = False) -> Geometry:
+                    satin: bool = False, fixes: "lettering.Fixes | None" = None) -> Geometry:
     """Trace the label map into mm geometry for one cache key (slow; use ``Session.geometry``).
 
     Applies the merge mapping, then for each color: splits off thin features as
@@ -400,6 +417,10 @@ def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines
     for src, dst in mapping.items():
         lut[src] = dst
     labels = lut[base_labels]
+    if fixes is not None and fixes != lettering.Fixes(repair_dots=False):
+        labels, report = lettering.apply(labels, fixes)
+    else:
+        report = lettering.Report(stroke=lettering.stroke_widths(labels != TRANSPARENT))
 
     ids = [int(i) for i in np.unique(labels) if i != TRANSPARENT]
     shapes, lines, satins = {}, {}, {}
@@ -445,7 +466,9 @@ def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines
     vals, cnts = np.unique(frame, return_counts=True)
     top = int(cnts.argmax())
     frame_label = int(vals[top]) if cnts[top] >= 0.5 * len(frame) else None
-    return Geometry(labels, shapes, lines, satins, area, adjacency, frame_label)
+    h, w = labels.shape
+    return Geometry(labels, shapes, lines, satins, area, adjacency, frame_label,
+                    w / PX_PER_MM, h / PX_PER_MM, report)
 
 
 def _resolve_merges(colors: list[dict]) -> dict[int, int]:
@@ -497,7 +520,7 @@ def build_plan(s: Session, req: dict) -> dict:
     prev_fabric = req.get("prev_fabric_hex")
     by_id = {c["id"]: c for c in req["colors"]}
     mapping = _resolve_merges(req["colors"])
-    geom = s.geometry(mapping, bool(req.get("thin_lines", True)), bool(req.get("satin", False)))
+    geom = s.geometry(mapping, bool(req.get("thin_lines", True)), bool(req.get("satin", False)), _fixes(req))
     eff_ids = [c["id"] for c in req["colors"] if c["id"] not in mapping and c["id"] in geom.shapes]
     outlines = set(req.get("outlines") or [])
     warnings: list[dict] = []
@@ -609,8 +632,39 @@ def build_plan(s: Session, req: dict) -> dict:
         "warnings": warnings,
         "summary": {"fabric_hex": fabric, "fabric_name": C.fabric_name(fabric),
                     "bobbin_name": bobbin_name, "bobbin_hex": bobbin_hex, "threads": threads},
+        "lettering": _lettering_payload(s, geom, req),
         "_geom": geom,
     }
+
+
+def _fixes(req: dict) -> "lettering.Fixes":
+    """The shape fixes a plan request asks for (``bolder_mm``, ``bolder_pct``,
+    ``repair_dots``, ``fill_corner_tips``), with the fabric's minimum gap."""
+    fab = F.get(req.get("fabric_type"))
+    return lettering.Fixes(bolder_mm=round(float(req.get("bolder_mm") or 0), 2),
+                           bolder_pct=round(float(req.get("bolder_pct") or 0), 1),
+                           repair_dots=bool(req.get("repair_dots", True)),
+                           fill_corner_tips=bool(req.get("fill_corner_tips", False)),
+                           min_gap_mm=fab.get("min_gap_mm", lettering.Fixes.min_gap_mm))
+
+
+def _lettering_payload(s: Session, geom: Geometry, req: dict) -> dict:
+    """Stroke widths, what the shape fixes did, knit-fabric minimums, and the edited
+    label map (``label_png``, only when the shapes changed) for the live preview."""
+    rep = geom.lettering
+    fab = F.get(req.get("fabric_type"))
+    out = {"stroke": rep.stroke if rep else None, "notes": list(rep.notes) if rep else [],
+           "warnings": list(rep.warnings) if rep else [], "grow_mm": rep.grow_mm if rep else 0,
+           "width_mm": round(geom.width_mm, 2), "height_mm": round(geom.height_mm, 2), "label_png": None}
+    min_stroke = fab.get("min_stroke_mm")
+    if min_stroke and rep and rep.stroke and rep.stroke["min"] < min_stroke and not rep.grow_mm:
+        need = (min_stroke - rep.stroke["min"]) / 2
+        out["warnings"].append(f"The thinnest strokes are about {rep.stroke['min']:g} mm. On "
+                               f"{fab['label'].lower()} aim for at least {min_stroke:g} mm: knits swallow thin "
+                               f"strokes. Try Bolder +{math.ceil(need * 20) / 20:g} mm.")
+    if geom.labels.shape != s.labels.shape or (rep and rep.notes):
+        out["label_png"] = _label_png(geom.labels)
+    return out
 
 
 def suggest_order(stitched: list[int], decided: dict, geom: Geometry, fabric_ids: set[int]) -> list[int]:
@@ -738,6 +792,20 @@ def generate(s: Session, req: dict) -> dict:
     # Number layers in stitch order ("1 Dark green") so Ink/Stitch and the user see the order.
     for n, layer in enumerate(layers, 1):
         layer["label"] = f"{n} {layer['label']}"
+    # Bolder strokes make the design a little bigger: scale it back into the requested
+    # box, then run every check on the scaled result (minimums shrink with it).
+    W, H = geom.width_mm, geom.height_mm
+    f = min(1.0, *(b / d for b, d in zip(s.box_mm, (W, H)))) if s.box_mm else 1.0
+    if f < 0.999:
+        layers = [{**l, "shapes": [(scale_geom(g, f, f, origin=(0, 0)),
+                                    {**prm, "_satin": prm["_satin"].scaled(f)} if "_satin" in prm else prm)
+                                   for g, prm in l["shapes"]]} for l in layers]
+        W, H = W * f, H * f
+        plan["warnings"].append({"level": "info", "code": "scaled_to_fit",
+                                 "message": f"Bolder strokes made the design bigger, so it was scaled to "
+                                            f"{f * 100:.1f}% to stay within {s.box_mm[0]:g} × {s.box_mm[1]:g} mm."})
+    # a view of the session at the final size, for the checks below
+    s = replace(s, width_mm=W, height_mm=H, labels=np.broadcast_to(np.uint8(0), (round(H * PX_PER_MM), round(W * PX_PER_MM))))
     _order_shapes(layers, Point(s.width_mm / 2, s.height_mm / 2))
     hoop_w, hoop_h = M.oriented(s.width_mm, s.height_mm, *_hoop(req))
     speed = req.get("speed_spm") or M.DEFAULT_SPEED_SPM
@@ -754,7 +822,8 @@ def generate(s: Session, req: dict) -> dict:
             "needle": fab["needle"]}
     svg = write_svg(hoop_w, hoop_h, placed, meta)
     # Checks run on the unplaced layers, i.e. in design coordinates matching s.labels.
-    preview, preview_marked, geo_warnings = _render_and_check(s, layers, fabric)
+    preview, preview_marked, geo_warnings = _render_and_check(s, layers, fabric,
+                                                              fab.get("min_gap_mm", NARROW_GAP_MM))
     if max(s.width_mm - hoop_w, s.height_mm - hoop_h) + 2 * pull > 0:
         geo_warnings.append({"level": "warn", "code": "hoop_edge",
                              "message": f"With {pull:g} mm pull compensation the stitches reach past the "
@@ -1033,7 +1102,7 @@ def _disk(mm: float) -> np.ndarray:
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))
 
 
-def _render_and_check(s: Session, layers: list[dict], fabric_hex: str):
+def _render_and_check(s: Session, layers: list[dict], fabric_hex: str, gap_mm: float = NARROW_GAP_MM):
     """Paint the stitched preview and flag areas that won't stitch well.
 
     Layers are painted in stitch order over the fabric color at the label map's
@@ -1052,6 +1121,7 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str):
         s: The session (for the canvas size).
         layers: Final layers in design coordinates (not yet centered on the hoop).
         fabric_hex: Fabric color for the background.
+        gap_mm: Narrowest fabric gap that survives stitching (wider on knits).
 
     Returns:
         (preview PNG data URL, marked preview PNG data URL, list of warnings). Previews
@@ -1092,7 +1162,7 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str):
                                             f"{NARROW_STITCH_MM:g} mm: fill stitches may not hold there (orange on preview)."})
 
     fabric_mask = (covered == 0).astype(np.uint8)
-    gaps = fabric_mask.astype(bool) & ~cv2.morphologyEx(fabric_mask, cv2.MORPH_OPEN, _disk(NARROW_GAP_MM)).astype(bool)
+    gaps = fabric_mask.astype(bool) & ~cv2.morphologyEx(fabric_mask, cv2.MORPH_OPEN, _disk(gap_mm)).astype(bool)
     cc, long_ids, tip_ids = _long_components(gaps, 0.1 * px2)
     tips += len(tip_ids)
     gap_mask = np.isin(cc, long_ids)
@@ -1108,7 +1178,7 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str):
         where = ", ".join(t for t in (f"{between} between shapes" if between else "",
                                       f"{inside} inside a shape" if inside else "") if t)
         warnings.append({"level": "warn", "code": "narrow_gap",
-                         "message": f"{len(long_ids)} fabric gap(s) narrower than {NARROW_GAP_MM:g} mm ({where}) will "
+                         "message": f"{len(long_ids)} fabric gap(s) narrower than {gap_mm:g} mm ({where}) will "
                                     "likely close up when stitched (red on preview)."})
     if tips:
         warnings.append({"level": "info", "code": "corner_tips",
