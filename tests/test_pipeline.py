@@ -145,7 +145,7 @@ def test_flat_logo_svg(client):
     assert [g.get(f"{INK}label") for g in layers] == ["1 Dark green", "2 Light green"]
     for g in layers:
         assert 1 <= len(list(g.iter(f"{SVG}path"))) <= 4
-    assert "not stitched — fabric" in r["svg"]
+    assert "not stitched (fabric)" in r["svg"]
 
 
 def test_messy_trace_is_cleaned(client):
@@ -585,7 +585,7 @@ def test_satin_column_geometry():
     cv2.rectangle(m, (lo, 9 * PX_PER_MM), (hi, 11 * PX_PER_MM), 0, -1)
     cv2.rectangle(m, (lo, 9 * PX_PER_MM), (hi, int(9.6 * PX_PER_MM)), 1, -1)
     rest, sats = split_satin(m.astype(bool))
-    assert len(sats) == 1 and not rest.any()
+    assert len(sats) == 1 and not rest[:, lo + 6:hi - 6].any()          # the step's square corners may stay fill
 
     # a 0.9 mm bar (just under the minimum) is a satin widened to 1 mm, not a fill
     m = np.zeros((20 * PX_PER_MM, 40 * PX_PER_MM), np.uint8)
@@ -594,7 +594,7 @@ def test_satin_column_geometry():
     assert len(sats) == 1 and not rest[:, 10 * PX_PER_MM:30 * PX_PER_MM].any()
     assert min(math.dist(a, b) for a, b in zip(sats[0].rail1[2:-2], sats[0].rail2[2:-2])) >= 0.99
 
-    # two bars whose tips are 1 mm apart (neighboring serifs) are shortened to a gap
+    # two bars whose tips are 1 mm apart (neighboring serifs) are each pulled back so the gap
     # that survives sewing; a bar joined to another at a junction keeps its end
     from embroidery.vectorize import space_tips
     m = np.zeros((20 * PX_PER_MM, 50 * PX_PER_MM), np.uint8)
@@ -602,7 +602,7 @@ def test_satin_column_geometry():
     cv2.rectangle(m, (21 * PX_PER_MM, 10 * PX_PER_MM), (36 * PX_PER_MM, int(11.5 * PX_PER_MM)), 1, -1)
     _, sats = split_satin(m.astype(bool))
     spaced = space_tips(sats, [], m.astype(bool))
-    assert len(spaced) == 2 and spaced[0].poly.distance(spaced[1].poly) >= 1.7
+    assert len(spaced) == 2 and spaced[0].poly.distance(spaced[1].poly) >= 1.4      # each tip pulled back 0.3 mm
     assert min(s.poly.bounds[0] for s in spaced) < 5.5 and max(s.poly.bounds[2] for s in spaced) > 35.5   # outer ends kept
 
     # an isolated 1.5 mm dot is one dense satin; a dot touching a column stays a fill
@@ -651,3 +651,25 @@ def test_recommends_satin_for_strokes_and_fills_for_solid_art(client):
     assert script["satin"] and script["thin_lines"] and "recommended" in script["why"]
     flat = analyze(client, flat_logo_png(), "logo.png")["recommend"]
     assert not flat["satin"] and flat["thin_lines"]
+
+
+def test_corner_tips_and_small_fills():
+    """Narrow areas shorter than 1 mm (the point of a sharp inside corner) are corner
+    tips, not gaps; a long slit is a real gap. Small or compact thin pieces get tatami,
+    long thin strips contour fill."""
+    import cv2
+    import numpy as np
+    from shapely.geometry import box
+    from embroidery.raster import PX_PER_MM
+    from embroidery.vectorize import is_thin_or_ring
+
+    m = np.zeros((20 * PX_PER_MM, 20 * PX_PER_MM), np.uint8)
+    tri = np.array([[2, 2], [2.6, 2], [2, 2.6]]) * PX_PER_MM                 # a corner tip, 0.85 mm long
+    cv2.fillPoly(m, [tri.astype(np.int32)], 1)
+    cv2.rectangle(m, (5 * PX_PER_MM, 10 * PX_PER_MM), (15 * PX_PER_MM, int(10.4 * PX_PER_MM)), 1, -1)  # 10 mm slit
+    cc, long_ids, tips = pipeline._long_components(m.astype(bool), 0.1 * PX_PER_MM ** 2)
+    assert len(long_ids) == 1 and len(tips) == 1
+
+    assert not is_thin_or_ring(box(0, 0, 1.5, 1.0))        # serif foot: tatami
+    assert not is_thin_or_ring(box(0, 0, 4.2, 3.0))        # wedge where strokes meet: tatami
+    assert is_thin_or_ring(box(0, 0, 10, 0.8))             # long thin strip: contour

@@ -76,6 +76,8 @@ OUTLINE_MM = 1.0
 BORDER_MM = 1.0
 NARROW_STITCH_MM = 1.0
 NARROW_GAP_MM = 0.6
+HOOP_MARGIN_MM = 3.0       # warn when the design comes this close to the hoop's stitch field edge
+TIP_MIN_LONG_MM = 1.0      # narrow areas shorter than this are corner tips, not warnings
 PREVIEW_MAX_PX = 1000
 LINE_DRAW_MM = 0.7         # how wide a triple running stitch reads, for preview + gap checks
 DEFAULT_OVERLAP_MM = 0.3   # each color reaches this far under the colors it touches
@@ -163,7 +165,7 @@ def get_session(sid: str) -> Session:
         KeyError: If the session was evicted or never existed (for example after a restart).
     """
     if sid not in _SESSIONS:
-        raise KeyError("Session expired — drop the image again.")
+        raise KeyError("Session expired. Drop the image again.")
     _SESSIONS.move_to_end(sid)
     return _SESSIONS[sid]
 
@@ -587,7 +589,7 @@ def build_plan(s: Session, req: dict) -> dict:
     for cid in order:
         d = decided[cid]
         if d["fabric"]:
-            threads.append({"order": None, "hex": d["hex"], "name": d["name"], "status": "not stitched — fabric"})
+            threads.append({"order": None, "hex": d["hex"], "name": d["name"], "status": "not stitched (fabric)"})
             continue
         n += 1
         threads.append({"order": n, "hex": d["hex"], "name": d["layer_name"], "status": "stitched"})
@@ -756,7 +758,12 @@ def generate(s: Session, req: dict) -> dict:
     if max(s.width_mm - hoop_w, s.height_mm - hoop_h) + 2 * pull > 0:
         geo_warnings.append({"level": "warn", "code": "hoop_edge",
                              "message": f"With {pull:g} mm pull compensation the stitches reach past the "
-                                        f"{hoop_w:g} × {hoop_h:g} mm hoop — make the design a little smaller."})
+                                        f"{hoop_w:g} × {hoop_h:g} mm hoop: make the design a little smaller."})
+    elif max(s.width_mm - hoop_w, s.height_mm - hoop_h) + HOOP_MARGIN_MM > 0:
+        geo_warnings.append({"level": "warn", "code": "hoop_margin",
+                             "message": f"The design comes within {HOOP_MARGIN_MM:g} mm of the {hoop_w:g} × {hoop_h:g} mm "
+                                        f"stitch field. Hoops shift a little when stitching, so keep each side at most "
+                                        f"{hoop_w - HOOP_MARGIN_MM:g} × {hoop_h - HOOP_MARGIN_MM:g} mm."})
 
     plan["fabric"] = _fabric_advice(s, fab, pull, layers, machine, geo_warnings, (hoop_w, hoop_h))
     plan["warnings"] = s.warnings + plan["warnings"] + machine.pop("warnings") + geo_warnings
@@ -958,7 +965,7 @@ def _machine_summary(layers: list[dict], speed: float, hoop: tuple[float, float]
     for i, hx in enumerate(blocks):
         if hx in seen:
             warnings.append({"level": "warn", "code": "color_revisit",
-                             "message": f"Thread {C.color_name(hx)} ({hx}) is used again later in the order — "
+                             "message": f"Thread {C.color_name(hx)} ({hx}) is used again later in the order: "
                                         "that's an extra manual thread change. Reorder or change the outline color to avoid it."})
         seen.add(hx)
     area = sum(g.area for l in layers for g, _ in l["shapes"])
@@ -967,7 +974,7 @@ def _machine_summary(layers: list[dict], speed: float, hoop: tuple[float, float]
     jumps = sum(max(0, len(l["shapes"]) - 1) for l in layers)
     if est > STITCH_WARN:
         warnings.append({"level": "warn", "code": "stitch_count",
-                         "message": f"About {est:,} stitches — over {STITCH_WARN:,}, roughly "
+                         "message": f"About {est:,} stitches, over {STITCH_WARN:,}, roughly "
                                     f"{est / speed:.0f} min of stitching at {speed:g} spm. Consider a smaller size "
                                     "or leaving a large area as fabric."})
     return {"thread_blocks": len(blocks), "thread_changes": max(0, len(blocks) - 1), "thread_hexes": blocks,
@@ -985,6 +992,28 @@ def _fill(mask: np.ndarray, poly: Polygon) -> None:
     rings = [poly.exterior, *poly.interiors]
     pts = [np.round((np.asarray(r.coords) * PX_PER_MM - 0.5) * 8).astype(np.int32) for r in rings]
     cv2.fillPoly(mask, pts, 1, lineType=cv2.LINE_8, shift=3)
+
+
+def _long_components(mask: np.ndarray, min_px: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Split components of at least ``min_px`` pixels into long ones and corner tips.
+
+    A component counts as long when the long side of its minimum rotated rectangle is
+    at least ``TIP_MIN_LONG_MM``. The tip of a sharp inside corner narrows to nothing
+    by definition, so every one shows up as a narrow area; those are short triangles
+    and drop out here.
+
+    Returns:
+        (connected-component label image, ids of the long components, ids of the tips).
+    """
+    n, cc, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    long_ids, tips = [], []
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] < min_px:
+            continue
+        ys, xs = np.nonzero(cc[stats[i, 1]:stats[i, 1] + stats[i, 3], stats[i, 0]:stats[i, 0] + stats[i, 2]] == i)
+        (_, _), (rw, rh), _ = cv2.minAreaRect(np.stack([xs, ys], axis=1).astype(np.float32))
+        (long_ids if max(rw, rh) + 1 >= TIP_MIN_LONG_MM * PX_PER_MM else tips).append(i)
+    return cc, np.array(long_ids, int), np.array(tips, int)
 
 
 def _components(mask: np.ndarray, min_px: float) -> tuple[int, np.ndarray]:
@@ -1014,7 +1043,10 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str):
     * narrow stitch: parts of a fill layer a ``NARROW_STITCH_MM`` disk can't fit in
       (components of at least 0.3 mm²), marked orange;
     * narrow gap: uncovered fabric a ``NARROW_GAP_MM`` disk can't fit in (components
-      of at least 0.1 mm²), marked red.
+      of at least 0.1 mm²), marked red, labeled as between shapes or inside one.
+
+    Narrow areas shorter than ``TIP_MIN_LONG_MM`` are corner tips: counted in an
+    info line, not marked.
 
     Args:
         s: The session (for the canvas size).
@@ -1031,6 +1063,7 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str):
     covered = np.zeros((h, w), np.uint8)
     thin_all = np.zeros((h, w), bool)
     warnings = []
+    tips = 0
     px2 = PX_PER_MM ** 2
 
     line_px = max(1, round(LINE_DRAW_MM * PX_PER_MM))
@@ -1050,20 +1083,37 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str):
         covered |= m | stroke
         if layer["kind"] == "fill":
             narrow = m.astype(bool) & ~cv2.morphologyEx(m, cv2.MORPH_OPEN, _disk(NARROW_STITCH_MM)).astype(bool)
-            n, marked = _components(narrow, 0.3 * px2)
-            if n:
-                thin_all |= marked
+            cc, long_ids, tip_ids = _long_components(narrow, 0.3 * px2)
+            tips += len(tip_ids)
+            if len(long_ids):
+                thin_all |= np.isin(cc, long_ids)
                 warnings.append({"level": "warn", "code": "narrow_stitch",
-                                 "message": f"{layer['label']}: {n} area(s) narrower than {NARROW_STITCH_MM:g} mm "
-                                            "— fill stitches may not hold there (orange on preview)."})
+                                 "message": f"{layer['label']}: {len(long_ids)} area(s) narrower than "
+                                            f"{NARROW_STITCH_MM:g} mm: fill stitches may not hold there (orange on preview)."})
 
     fabric_mask = (covered == 0).astype(np.uint8)
     gaps = fabric_mask.astype(bool) & ~cv2.morphologyEx(fabric_mask, cv2.MORPH_OPEN, _disk(NARROW_GAP_MM)).astype(bool)
-    n_gaps, gap_mask = _components(gaps, 0.1 * px2)
-    if n_gaps:
+    cc, long_ids, tip_ids = _long_components(gaps, 0.1 * px2)
+    tips += len(tip_ids)
+    gap_mask = np.isin(cc, long_ids)
+    if len(long_ids):
+        # what each gap separates: two stitched shapes, or two parts of the same shape
+        _, shape_cc = cv2.connectedComponents((covered > 0).astype(np.uint8), connectivity=8)
+        ring = np.ones((5, 5), np.uint8)
+        between = 0
+        for i in long_ids:
+            touch = shape_cc[cv2.dilate((cc == i).astype(np.uint8), ring).astype(bool)]
+            between += len(set(touch[touch > 0].tolist())) > 1
+        inside = len(long_ids) - between
+        where = ", ".join(t for t in (f"{between} between shapes" if between else "",
+                                      f"{inside} inside a shape" if inside else "") if t)
         warnings.append({"level": "warn", "code": "narrow_gap",
-                         "message": f"{n_gaps} fabric gap(s) narrower than {NARROW_GAP_MM:g} mm will likely close up "
-                                    "when stitched (red on preview)."})
+                         "message": f"{len(long_ids)} fabric gap(s) narrower than {NARROW_GAP_MM:g} mm ({where}) will "
+                                    "likely close up when stitched (red on preview)."})
+    if tips:
+        warnings.append({"level": "info", "code": "corner_tips",
+                         "message": f"{tips} corner tip(s) OK: the points of sharp inside corners always narrow to "
+                                    "nothing, so they aren't counted as problems."})
 
     scale = min(1.0, PREVIEW_MAX_PX / max(h, w))
     # Dilate marks by about one preview pixel so they stay visible after downscaling.

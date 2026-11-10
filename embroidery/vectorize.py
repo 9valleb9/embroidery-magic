@@ -1,4 +1,4 @@
-"""Steps 4 and 7 — label mask -> clean shapely polygons, and per-shape stitch settings.
+"""Steps 4 and 7: label mask -> clean shapely polygons, and per-shape stitch settings.
 
 Where this sits in the flow:
 
@@ -86,6 +86,8 @@ MIN_PART_MM2 = 1.0        # polygons smaller than this (mm²) are dropped
 MIN_HOLE_MM2 = 0.8        # holes smaller than this (mm²) are filled over
 SIMPLIFY_MM = 0.04        # Douglas-Peucker tolerance for traced outlines
 THIN_RATIO_MM = 1.2       # area / perimeter below this -> contour fill
+CONTOUR_MIN_LONG_MM = 4.0  # thin shapes shorter than this are small blobs: tatami, not contour
+CONTOUR_MIN_ASPECT = 2.5   # ...or less than this many times longer than wide
 RING_HOLE_SHARE = 0.5     # one hole covering more than this share of the outline -> ring
 AXIS_TOL_DEG = 3.0        # an edge within this of horizontal/vertical counts as axis-aligned
 AXIS_SHARE = 0.6          # share of outline length that must be axis-aligned for mostly_axis_aligned
@@ -205,12 +207,21 @@ def long_axis_angle(poly: Polygon) -> int:
 def is_thin_or_ring(poly: Polygon) -> bool:
     """True when a shape should get contour fill instead of tatami.
 
-    Thin: area / perimeter below ``THIN_RATIO_MM`` (perimeter includes holes).
+    Thin: area / perimeter below ``THIN_RATIO_MM`` (perimeter includes holes) and at
+    least ``CONTOUR_MIN_LONG_MM`` long and ``CONTOUR_MIN_ASPECT`` times longer than
+    wide. A small or compact piece (a serif foot, a junction leftover, the point where
+    two strokes meet) is thin by that ratio too, but contour fill spirals into a
+    scribble on it, so it gets tatami.
     Ring: exactly one hole, covering more than ``RING_HOLE_SHARE`` of the
     area inside the outer edge.
     """
     if poly.length and poly.area / poly.length < THIN_RATIO_MM:
-        return True
+        rect = poly.minimum_rotated_rectangle
+        if isinstance(rect, Polygon):
+            c = list(rect.exterior.coords)
+            a, b = sorted((math.dist(c[0], c[1]), math.dist(c[1], c[2])))
+            if b >= CONTOUR_MIN_LONG_MM and b >= CONTOUR_MIN_ASPECT * a:
+                return True
     if len(poly.interiors) == 1:
         outer = Polygon(poly.exterior).area
         return outer > 0 and Polygon(poly.interiors[0]).area / outer > RING_HOLE_SHARE
@@ -285,7 +296,7 @@ def band(polys: list[Polygon], width_mm: float, outer_only: bool = False) -> lis
 # stitched instead as a triple (bean) running stitch in the same color.
 
 THIN_LINE_MM = 1.0
-MIN_LINE_MM = 2.0          # shorter thin bits are corner slivers — they stay in the fill
+MIN_LINE_MM = 2.0          # shorter thin bits are corner slivers; they stay in the fill
 LINE_SIMPLIFY_MM = 0.08
 LINE_PARAMS = {"stroke_method": "running_stitch", "running_stitch_length_mm": "2",
                "bean_stitch_repeats": "1"}
@@ -488,6 +499,8 @@ SATIN_SPACING_MM = 0.4     # Ink/Stitch's default zig-zag spacing
 LINE_SATIN_MM = 1.0        # in satin mode, hairlines are stitched as satin this wide
 SATIN_NARROW_MM = 0.7      # strokes this wide up to SATIN_MIN_MM are widened to it
 SATIN_BRIDGE_MM = 3.0      # a column carries on through a thinner dip up to this long, at SATIN_MIN_MM
+SATIN_KEEP_BIT_MM2 = 0.3   # compact leftovers this big are kept even when thinner than SATIN_SLIVER_MM
+SATIN_KEEP_BIT_LONG_MM = 2.5   # ... if no longer than this (edge strips along a column are longer)
 SATIN_SLIVER_MM = 0.5      # leftovers narrower than this along a column are its edge, not a fill
 
 
@@ -660,6 +673,17 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
     n, cc, stats, _ = cv2.connectedComponentsWithStats(solid, connectivity=8)
     keep = np.flatnonzero(stats[1:, cv2.CC_STAT_AREA] >= 0.2 * PX_PER_MM ** 2) + 1
     solid = np.isin(cc, keep).astype(np.uint8)
+    # A compact bit the opening removed (a foot serif's bump beside a column's end, the
+    # rounded corner of a flared end) is real letter shape, not an edge strip: strips
+    # run along a column, so they're long. Keep the compact ones.
+    n, cc, stats, _ = cv2.connectedComponentsWithStats(left & ~solid, connectivity=8)
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] < SATIN_KEEP_BIT_MM2 * PX_PER_MM ** 2:
+            continue
+        ys, xs = np.nonzero(cc == i)
+        (_, _), (rw, rh), _ = cv2.minAreaRect(np.stack([xs, ys], axis=1).astype(np.float32))
+        if max(rw, rh) <= SATIN_KEEP_BIT_LONG_MM * PX_PER_MM:
+            solid[cc == i] = 1
     grown = cv2.dilate(solid, disk(2 * 0.3)).astype(bool)
     return mask & grown, out
 
@@ -725,7 +749,8 @@ def split_dots(mask: np.ndarray, satins: list[Satin]) -> tuple[np.ndarray, list[
     return mask & ~np.isin(cc, drop), out
 
 
-SATIN_TIP_GAP_MM = 1.8     # satin tips closer than this to a separate shape are shortened
+SATIN_TIP_GAP_MM = 1.8     # satin tips closer than this to a separate shape are shortened...
+SATIN_TIP_PULLBACK_MM = 0.3   # ...by at most this: about how far a satin end pushes out when sewn
 
 
 def space_tips(sats: list[Satin], others: list, design: np.ndarray) -> list[Satin]:
@@ -735,8 +760,10 @@ def space_tips(sats: list[Satin], others: list, design: np.ndarray) -> list[Sati
     tips sews shut and the serifs fuse into one bar. An end rung closer than
     ``SATIN_TIP_GAP_MM`` to a shape that doesn't touch this column (another column,
     a fill or a line) is moved back along the column: half the shortfall when the
-    neighbor is another column (it moves back too), all of it otherwise. A column is
-    never cut below a third of its length. Ends that touch another shape (junctions)
+    neighbor is another column (it moves back too), all of it otherwise, but never
+    more than ``SATIN_TIP_PULLBACK_MM`` (about how far a satin end pushes out when
+    sewn, so the stitched end lands where the artwork's end is) or a third of the
+    column's length. Ends that touch another shape (junctions)
     are left alone, and neighbors that the artwork joins (no fabric
     between them in ``design``) are not gaps and are left alone.
 
@@ -788,7 +815,7 @@ def space_tips(sats: list[Satin], others: list, design: np.ndarray) -> list[Sati
         if not any(cut):
             out.append(sat)
             continue
-        cap = s[-1] / 3
+        cap = min(s[-1] / 3, SATIN_TIP_PULLBACK_MM)
         a, b = min(cut[0], cap), s[-1] - min(cut[1], cap)
         keep = (s > a) & (s < b)
         interp = lambda rail, t: (float(np.interp(t, s, rail[:, 0])), float(np.interp(t, s, rail[:, 1])))
@@ -960,6 +987,25 @@ def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, Fal
     nrm = np.vstack([nrm[0], nrm, nrm[-1]])
     end = lambda v: np.concatenate([[v[0] * (0.6 if tips[0] else 1.0)], v, [v[-1] * (0.6 if tips[1] else 1.0)]])
     rl, rr = end(rl), end(rr)
+    if mask is not None:
+        # a free tip follows the stroke's own outline to its real end (a rounded foot
+        # or flared serif) instead of a fixed taper that leaves its corners bare
+        for e in (0, 1):
+            if not tips[e]:
+                continue
+            i0 = 1 if e == 0 else len(c) - 2               # last real centerline node
+            d = -tan[i0] if e == 0 else tan[i0]
+            tc, tl, tr = _tip_rungs(mask, c[i0], d, float(r[0] if e == 0 else r[-1]))
+            if not len(tc):
+                continue
+            tn = np.repeat(nrm[i0][None], len(tc), axis=0)
+            tt = np.repeat(tan[i0][None], len(tc), axis=0)
+            if e == 0:                                      # rungs run toward the start: reverse them
+                c = np.vstack([tc[::-1], c[1:]]); nrm = np.vstack([tn, nrm[1:]]); tan = np.vstack([tt, tan[1:]])
+                rl = np.concatenate([tl[::-1], rl[1:]]); rr = np.concatenate([tr[::-1], rr[1:]])
+            else:
+                c = np.vstack([c[:-1], tc]); nrm = np.vstack([nrm[:-1], tn]); tan = np.vstack([tan[:-1], tt])
+                rl = np.concatenate([rl[:-1], tl]); rr = np.concatenate([rr[:-1], tr])
     left, right = c + nrm * rl[:, None], c - nrm * rr[:, None]
     keep = [0]
     for i in range(1, len(c)):                # drop node pairs that fold back on a tight inner curve
@@ -976,15 +1022,9 @@ def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, Fal
         return None
 
 
-def _edges_along(mask: np.ndarray, c: np.ndarray, nrm: np.ndarray, r: np.ndarray):
-    """Distance (mm) from each centerline node to the stroke's edge on each side, along the rung.
-
-    Rails offset symmetrically from the skeleton zig-zag unevenly wherever the skeleton
-    sits off center or the width estimate is noisy; measuring each side puts every rung
-    end on the real edge. A side that runs on (into a junction or another stroke) or
-    reads under half its expected reach keeps the symmetric estimate ``r``. The result
-    is median-smoothed over 5 nodes, plus 0.5 px of overlap like ``r``.
-    """
+def _edge_dist(mask: np.ndarray, c: np.ndarray, nrm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Raw distance (mm) from each point to the mask's edge along +nrm and -nrm, plus
+    0.5 px of overlap. Measured in half-pixel steps up to ``SATIN_MAX_MM``."""
     step = 0.5 / PX_PER_MM
     reach = np.arange(0, SATIN_MAX_MM, step)
     h, w = mask.shape
@@ -994,7 +1034,54 @@ def _edges_along(mask: np.ndarray, c: np.ndarray, nrm: np.ndarray, r: np.ndarray
         px = np.clip(np.round(pts * PX_PER_MM - 0.5).astype(int), 0, [w - 1, h - 1])
         inside = mask[px[..., 1], px[..., 0]]
         first_out = np.where(inside.all(axis=1), len(reach), np.argmin(inside, axis=1))
-        d = reach[np.minimum(first_out, len(reach) - 1)] - step / 2 + 0.5 / PX_PER_MM
+        out.append(reach[np.minimum(first_out, len(reach) - 1)] - step / 2 + 0.5 / PX_PER_MM)
+    return out[0], out[1]
+
+
+def _tip_rungs(mask: np.ndarray, p: np.ndarray, tan: np.ndarray, r: float):
+    """Rungs that carry a free tip out to the stroke's real end, following its outline.
+
+    Steps from the last centerline point along ``tan`` every 0.25 mm while the point is
+    still inside the mask, measuring the edge on both sides, so a rounded or flared end
+    is covered instead of cut off by a taper. Stops after 3 half-widths, or where the
+    stroke is under 0.2 mm wide.
+
+    Returns:
+        (centers, left distances, right distances) as arrays, possibly empty.
+    """
+    h, w = mask.shape
+    nrm = np.array([-tan[1], tan[0]])
+    cs = []
+    for t in np.arange(0.25, 3 * r + 0.25, 0.25):
+        q = p + tan * t
+        x, y = int(round(q[0] * PX_PER_MM - 0.5)), int(round(q[1] * PX_PER_MM - 0.5))
+        if not (0 <= x < w and 0 <= y < h and mask[y, x]):
+            break
+        cs.append(q)
+    if not cs:
+        return np.zeros((0, 2)), np.zeros(0), np.zeros(0)
+    cs = np.array(cs)
+    dl, dr = _edge_dist(mask, cs, np.repeat(nrm[None], len(cs), axis=0))
+    dl, dr = np.minimum(dl, 1.5 * r), np.minimum(dr, 1.5 * r)
+    n = len(cs)
+    for i in range(n):
+        if dl[i] + dr[i] < 0.2:
+            n = i
+            break
+    return cs[:n], dl[:n], dr[:n]
+
+
+def _edges_along(mask: np.ndarray, c: np.ndarray, nrm: np.ndarray, r: np.ndarray):
+    """Distance (mm) from each centerline node to the stroke's edge on each side, along the rung.
+
+    Rails offset symmetrically from the skeleton zig-zag unevenly wherever the skeleton
+    sits off center or the width estimate is noisy; measuring each side puts every rung
+    end on the real edge. A side that runs on (into a junction or another stroke) or
+    reads under half its expected reach keeps the symmetric estimate ``r``. The result
+    is median-smoothed over 5 nodes, plus 0.5 px of overlap like ``r``.
+    """
+    out = []
+    for d in _edge_dist(mask, c, nrm):
         bad = (d > 1.5 * r) | (d < 0.5 * r)
         d = np.where(bad, r, d)
         d = np.array([np.median(d[max(0, i - 2):i + 3]) for i in range(len(d))])

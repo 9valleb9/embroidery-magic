@@ -1,4 +1,4 @@
-"""Step 1 — rasterize PNG/JPG/SVG input at 20 px per mm of final size.
+"""Step 1: rasterize PNG/JPG/SVG input at 20 px per mm of final size.
 
 Where this sits in the flow:
 

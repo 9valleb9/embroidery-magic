@@ -183,7 +183,7 @@
   <section>
     <h2>1 · Image &amp; options</h2>
     <div id="drop" tabindex="0">
-      <div id="dropContent"><strong>Drop a logo here</strong><br>PNG, JPG or SVG — or click to choose</div>
+      <div id="dropContent"><strong>Drop a logo here</strong><br>PNG, JPG or SVG, or click to choose</div>
     </div>
     <input type="file" id="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" hidden>
 
@@ -206,9 +206,9 @@
 
     <label class="field">Design final size (mm, fits inside the hoop)</label>
     <div class="row">
-      <input type="number" id="w" value="99" min="5" step="1" aria-label="Width mm">
+      <input type="number" id="w" value="97" min="5" step="1" aria-label="Width mm">
       <span style="flex:0">×</span>
-      <input type="number" id="h" value="99" min="5" step="1" aria-label="Height mm">
+      <input type="number" id="h" value="97" min="5" step="1" aria-label="Height mm">
     </div>
     <div class="hint" id="actualSize">The design is fitted inside this box (aspect ratio kept) and centered in the hoop.</div>
 
@@ -248,7 +248,7 @@
       Within ΔE&nbsp;8 of the fabric they're knocked out automatically.</div>
     <label class="hint" id="thinBox" hidden style="display:flex;gap:8px;align-items:flex-start;margin-top:10px;color:var(--ink)">
       <input type="checkbox" id="thinLines" checked style="margin-top:2px">
-      <span><b>Stitch thin lines as outlines</b> <span class="tag" id="thinRec" hidden>recommended</span> — features under 1 mm wide become a triple running stitch
+      <span><b>Stitch thin lines as outlines</b> <span class="tag" id="thinRec" hidden>recommended</span>: features under 1 mm wide become a triple running stitch
         (fills can't hold them). Cleaner lines, but usually a few more jumps to trim.</span></label>
     <label class="hint" id="satinBox" hidden style="display:flex;gap:8px;align-items:flex-start;margin-top:10px;color:var(--ink)">
       <input type="checkbox" id="satin" style="margin-top:2px">
@@ -294,7 +294,7 @@
       <canvas id="live" hidden></canvas>
       <img id="resultImg" hidden alt="Stitched result preview">
       <span class="badge" id="stageBadge" hidden></span>
-      <div class="stale" id="stale" hidden>Settings changed — generate again</div>
+      <div class="stale" id="stale" hidden>Settings changed: generate again</div>
     </div>
     <div style="margin-top:12px"><button class="primary" id="generate" disabled>Generate SVG</button></div>
     <div id="out" hidden>
@@ -501,7 +501,7 @@ const fits = (w, h, hw, hh) => (w <= hw + .05 && h <= hh + .05) || (w <= hh + .0
 function sizeOk() {
   const w = +$("w").value, h = +$("h").value, m = state.machine;
   if (!(m.hoopW >= 10 && m.hoopH >= 10)) { showError("Enter the hoop's stitch field in mm."); return false; }
-  if (!fits(w, h, m.hoopW - 2 * EDGE_MM, m.hoopH - 2 * EDGE_MM)) { showError(`${w} × ${h} mm doesn't fit the ${m.hoopW} × ${m.hoopH} mm hoop — the largest design is ${m.hoopW - 2 * EDGE_MM} × ${m.hoopH - 2 * EDGE_MM} mm (${EDGE_MM} mm is kept free at each edge for pull compensation).`); return false; }
+  if (!fits(w, h, m.hoopW - 2 * EDGE_MM, m.hoopH - 2 * EDGE_MM)) { showError(`${w} × ${h} mm doesn't fit the ${m.hoopW} × ${m.hoopH} mm hoop: the largest design is ${m.hoopW - 2 * EDGE_MM} × ${m.hoopH - 2 * EDGE_MM} mm (${EDGE_MM} mm is kept free at each edge for pull compensation).`); return false; }
   if (!(w >= 5 && h >= 5)) { showError("Size must be at least 5 mm."); return false; }
   showError(null);
   return true;
@@ -524,8 +524,8 @@ async function analyze() {
   showError(null);
   const fd = new FormData();
   fd.append("file", state.file);
-  fd.append("width_mm", $("w").value || 99);
-  fd.append("height_mm", $("h").value || 99);
+  fd.append("width_mm", $("w").value || 97);
+  fd.append("height_mm", $("h").value || 97);
   fd.append("sliver_mm", state.stitch.sliver);
   fd.append("hoop_w", state.machine.hoopW);
   fd.append("hoop_h", state.machine.hoopH);
@@ -572,7 +572,7 @@ function renderBackground(bg) {
   $("bgHint").innerHTML = `<span class="sw" style="display:inline-block;width:10px;height:10px;border-radius:2px;border:1px solid #0003;background:${bg.hex};vertical-align:-1px"></span>
     ${bg.hex} fills ${Math.round(bg.share * 100)}% of the image edge. ` + (bg.removed
       ? "It's removed (never stitched) and the design is cropped to fill your size. Same-colored areas inside the design are kept."
-      : "It's kept as part of the design — e.g. for a patch.");
+      : "It's kept as part of the design, e.g. for a patch.");
 }
 $("removeBg").addEventListener("change", (e) => {
   state.removeBg = e.target.checked ? "on" : "off";
@@ -924,7 +924,7 @@ $("tabs").addEventListener("click", (e) => {
   if (!b.classList.contains("locked")) { $("tabsHint").textContent = ""; return showTab(b.dataset.tab); }
   const target = TAB_NEEDS[b.dataset.tab] === "export" && state.result ? $("exportBtn") : $("generate");
   $("tabsHint").textContent = !state.labelData ? "Drop an image first."
-    : TAB_NEEDS[b.dataset.tab] === "export" && state.result ? `Click “Export .${state.machine.format}” below first — this view is drawn from the real machine file.`
+    : TAB_NEEDS[b.dataset.tab] === "export" && state.result ? `Click “Export .${state.machine.format}” below first: this view is drawn from the real machine file.`
     : "Click “Generate SVG” below first.";
   if (target) { target.classList.remove("nudge"); void target.offsetWidth; target.classList.add("nudge"); }
 });
@@ -1220,7 +1220,7 @@ function renderExport() {
     if (t.order && (!stitched.length || stitched[stitched.length - 1].hex !== t.hex)) stitched.push(t);
   const checks = [
     [!r.problems.some(p => p.includes("signature")), `${ext} file${r.signature ? ` (${esc(r.signature)})` : ""}, ${(r.size_bytes / 1024).toFixed(0)} KB, read back OK`],
-    [fits(r.extent_mm[0], r.extent_mm[1], hw, hh), `Stitches span ${r.extent_mm[0]} × ${r.extent_mm[1]} mm — fits the ${hoopText(hw, hh)} hoop (the machine centers it)`],
+    [fits(r.extent_mm[0], r.extent_mm[1], hw, hh), `Stitches span ${r.extent_mm[0]} × ${r.extent_mm[1]} mm: fits the ${hoopText(hw, hh)} hoop (the machine centers it)`],
     [r.longest_stitch_mm <= r.max_stitch_mm, `Longest stitch ${r.longest_stitch_mm} mm (limit ${r.max_stitch_mm} mm)`],
     [r.color_blocks === state.result.machine.thread_blocks, `${r.color_blocks} color block${r.color_blocks === 1 ? "" : "s"}, each color stitched once`],
   ];
@@ -1235,22 +1235,22 @@ function renderExport() {
   out.innerHTML = `
     <ul class="checks">${checks.map(([ok, t]) => `<li class="${ok ? "" : "bad"}">${t}</li>`).join("")}</ul>
     ${r.problems.map(p => `<div class="warn">${esc(p)}</div>`).join("")}
-    ${r.stitches > 25000 ? `<div class="warn">${r.stitches.toLocaleString()} stitches — about ${r.minutes} min at ${r.speed_spm} spm.</div>` : ""}
+    ${r.stitches > 25000 ? `<div class="warn">${r.stitches.toLocaleString()} stitches, about ${r.minutes} min at ${r.speed_spm} spm.</div>` : ""}
     <h3>Thread changes</h3>
     <table class="summary">${r.threads.map((t, i) => { const mine = stitched[i]; return `<tr><td>${t.order}</td>
       <td>${mine ? `<span class="sw" style="background:${mine.hex}"></span>${esc(mine.name)}` : ""}</td>
       <td style="color:var(--muted)">${screen(t)}</td>
       <td>${t.stitches.toLocaleString()} st · ${(t.stitches / r.speed_spm).toFixed(1)} min</td></tr>`; }).join("")}</table>
     <div class="hint">${r.palette
-      ? `${ext} stores colors as ${r.palette} palette entries, so the machine's screen shows the nearest ${r.palette} name at each stop — load your actual thread (left column).`
-      : `${ext} doesn't store thread colors — the machine just stops between colors. Load them in the order on the left.`}</div>
+      ? `${ext} stores colors as ${r.palette} palette entries, so the machine's screen shows the nearest ${r.palette} name at each stop: load your actual thread (left column).`
+      : `${ext} doesn't store thread colors: the machine just stops between colors. Load them in the order on the left.`}</div>
     <h3>Jumps to trim</h3>
     ${r.trims.length ? `<table class="trims"><tr><th>#</th><th>Color</th><th>From → to (mm from hoop top-left)</th><th>Length</th></tr>
       ${r.trims.map(t => `<tr><td><span class="pill">${t.number}</span></td><td>${t.color}. ${esc(stitched[t.color - 1]?.name || t.color_name)}</td>
         <td>(${t.from_mm.join(", ")}) → (${t.to_mm.join(", ")})</td><td>${t.length_mm} mm</td></tr>`).join("")}</table>
       <div class="hint">Jumps between shapes of the same color. Machines without automatic jump trimming (like the
-        Brother SE400) leave these as loose threads — snip each one after its color finishes (numbered on the Stitch-out tab).</div>`
-      : `<div class="hint">No jumps within a color — nothing to trim besides the color changes.</div>`}
+        Brother SE400) leave these as loose threads: snip each one after its color finishes (numbered on the Stitch-out tab).</div>`
+      : `<div class="hint">No jumps within a color: nothing to trim besides the color changes.</div>`}
     <div style="margin-top:12px"><a class="btn primary" href="/api/export/${ex.job_id}/file" download>Download ${ext}</a></div>`;
 }
 

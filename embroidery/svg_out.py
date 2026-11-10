@@ -1,4 +1,4 @@
-"""Step 6 — write the Ink/Stitch-ready SVG.
+"""Step 6: write the Ink/Stitch-ready SVG.
 
 Where it sits: called by ``pipeline.generate`` once layers are decided, ordered and
 placed on the hoop. The returned SVG text is offered as a download and is the input to

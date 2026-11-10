@@ -1,4 +1,4 @@
-"""Embroidery Magic — logo image -> Ink/Stitch-ready embroidery SVG.
+"""Embroidery Magic: logo image -> Ink/Stitch-ready embroidery SVG.
 
 Run:  python app.py      (opens http://127.0.0.1:8765)
 
@@ -134,7 +134,7 @@ def logo():
 
 
 @app.post("/api/analyze")
-async def analyze(file: UploadFile = File(...), width_mm: float = Form(99), height_mm: float = Form(99),
+async def analyze(file: UploadFile = File(...), width_mm: float = Form(97), height_mm: float = Form(97),
                   hoop_w: float = Form(100), hoop_h: float = Form(100),
                   n_colors: str = Form("auto"), remove_bg: str = Form("auto"),
                   sliver_mm: float = Form(pipeline.MORPH_DISK_MM)):
@@ -175,7 +175,7 @@ async def analyze(file: UploadFile = File(...), width_mm: float = Form(99), heig
     if not machines.fits(width_mm, height_mm, *machines.max_design(hoop_w, hoop_h)):
         mw, mh = machines.max_design(hoop_w, hoop_h)
         raise HTTPException(400, f"{width_mm:g} × {height_mm:g} mm doesn't fit the "
-                                 f"{machines.hoop_label(hoop_w, hoop_h)} hoop — the largest design is {mw:g} × {mh:g} mm "
+                                 f"{machines.hoop_label(hoop_w, hoop_h)} hoop: the largest design is {mw:g} × {mh:g} mm "
                                  f"({machines.EDGE_MARGIN_MM:g} mm kept free at each edge for pull compensation).")
     if width_mm < 5 or height_mm < 5:
         raise HTTPException(400, "Size must be at least 5 mm.")
@@ -273,7 +273,7 @@ def start_export(req: PlanIn):
     """
     _check_req(req)
     if not export.find_inkstitch():
-        raise HTTPException(501, "Ink/Stitch isn't installed — export the machine file from Inkscape instead.")
+        raise HTTPException(501, "Ink/Stitch isn't installed. Export the machine file from Inkscape instead.")
     s = _session(req.session_id)
     r = pipeline.generate(s, req.model_dump())
     fmt = req.format.lower()

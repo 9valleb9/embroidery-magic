@@ -4,7 +4,7 @@
 
 [![tests](https://github.com/9valleb9/embroidery-magic/actions/workflows/test.yml/badge.svg)](https://github.com/9valleb9/embroidery-magic/actions/workflows/test.yml)
 
-**Turn a logo into a machine embroidery file — free, open source, runs on your computer.**
+**Turn a logo into a machine embroidery file. Free, open source, runs on your computer.**
 
 Drop in a PNG, JPG or SVG logo, pick your machine, hoop and fabric, and get a stitch file you can put on a USB stick: **.pes** (Brother, Baby Lock), **.jef** (Janome, Elna), **.vp3** (Husqvarna Viking, Pfaff), **.exp** (Bernina), **.xxx** (Singer) or **.dst**. Every file is read back and checked before you download it.
 
@@ -72,12 +72,12 @@ Sample inputs are in `samples/`: the mountain badge above, a flat 3-color logo, 
 
 ![The app: machine and hoop on the left, thread list in the middle, stitch-out preview read back from the .pes on the right](docs/screenshot.jpg)
 
-1. **Pick your machine and drop an image.** Set the format, hoop, **design final size** and the number of thread colors. The design is fitted inside the W×H box with its aspect ratio kept and centered in the hoop; the line under the box shows its real size (e.g. *99 × 38.45 mm · hoop 100 × 100 mm*), and the live preview draws it inside a dashed hoop outline. *Auto* suggests the fewest colors that cover every flat area.
+1. **Pick your machine and drop an image.** Set the format, hoop, **design final size** and the number of thread colors. The design is fitted inside the W×H box with its aspect ratio kept and centered in the hoop; the line under the box shows its real size (e.g. *97 × 38 mm · hoop 100 × 100 mm*), and the live preview draws it inside a dashed hoop outline. *Auto* suggests the fewest colors that cover every flat area.
 2. **Pick the fabric type and color.** The type sets the stitch settings (see [Fabric types](#fabric-types)). For the color, use a preset (White, Black, Navy, Gray, Tan leather, Red) or the color picker. The live preview always renders on the fabric color.
 3. **Edit the threads.** You can change a color's hex, **Merge into…** another color, toggle **Stitch / Fabric**, and drag rows to set the stitch order. Colors within ΔE2000 < 8 of the fabric are knocked out automatically, and *reset to auto* undoes a manual override.
 4. **Generate.** You get a stitched preview, a *Problem areas* view (red = fabric gaps < 0.6 mm, orange = stitched areas < 1 mm wide), warnings with one-click fixes, a **Before you stitch** box (stabilizer, needle, topping, the settings the fabric applied, and notes about this design), a summary (fabric, bobbin, thread list) and the SVG download.
 
-**Remove background** (shown when one color fills most of the image's edge, on by default): the region of that color connected to the image edge — found by flood fill — is never stitched, and the design is cropped to fill your size. Areas of the same color *inside* the design stay a normal thread color (e.g. white parts of a logo on navy fabric). Turn it off for full-frame designs like patches.
+**Remove background** (shown when one color fills most of the image's edge, on by default): the region of that color connected to the image edge (found by flood fill) is never stitched, and the design is cropped to fill your size. Areas of the same color *inside* the design stay a normal thread color (e.g. white parts of a logo on navy fabric). Turn it off for full-frame designs like patches.
 
 **Stitch thin lines as outlines** (thread panel, on by default): features under 1 mm wide, such as a logo's outline, can't hold a fill. Their centerline (skeleton) is stitched as a triple (bean) running stitch in the same color: `inkstitch:stroke_method="running_stitch"`, `bean_stitch_repeats="1"`, 2 mm stitches. Line pieces that meet are joined into continuous runs and stitched next to the fills they touch. Short thin bits (corner slivers under 2 mm) stay part of the fill. It usually adds a few hand trims; turn it off to compare.
 
@@ -118,7 +118,7 @@ Pick the **file format** for your brand, your **hoop** (4×4, 5×7, 6×10, 8×8 
 
 | Constraint | How the app handles it |
 |---|---|
-| Hoop size | The design must fit the hoop's stitch field, either way round, with 0.5 mm kept free at each edge because pull compensation stitches slightly past the design's edge (so 99 × 99 mm max on a 4×4). The SVG canvas is the hoop, turned to match the design, with the design centered on it. |
+| Hoop size | The design must fit the hoop's stitch field, either way round, with 0.5 mm kept free at each edge because pull compensation stitches slightly past the design's edge (so 99 × 99 mm max on a 4×4). Above 97 mm a warning suggests leaving 3 mm, since hoops shift a little while stitching. The SVG canvas is the hoop, turned to match the design, with the design centered on it. |
 | File format | **Export** runs `inkstitch --extension=output --format=<fmt>` in the background (about 20–60 s). It then reads the file back with pyembroidery and checks the signature (.pes, .dst), that the stitches fit the hoop, that the longest stitch is ≤ 12.1 mm, and that each color is exactly one block. |
 | Single needle | It shows the thread-change count. Colors with ΔE < 5 are merged by default (unmerge them in the thread list), and each color is stitched in one block. A warning appears if an outline or border would bring a thread color back later. |
 | Stitch time | Stitches ÷ your machine's speed (default 400 spm, the Brother SE400). A geometry estimate (about 1.9 stitches/mm²) shows right after Generate; the exact count from the file replaces it after export. |
@@ -154,7 +154,7 @@ All color comparisons use ΔE2000 (`skimage.color.deltaE_ciede2000`).
 - **Suggested stitch order:** the largest area goes first. The rest follow with colors touching the fabric and larger areas first, and lighter colors ahead of darker ones wherever two colors touch.
 - **Bobbin:** white or black, whichever is closer to the fabric.
 
-The fabric color, fabric type, stabilizer, needle, bobbin and thread list (fabric colors marked *not stitched — fabric*) are written to the SVG's `<metadata>` (`urn:embroidery-magic` namespace) and shown in the UI.
+The fabric color, fabric type, stabilizer, needle, bobbin and thread list (fabric colors marked *not stitched (fabric)*) are written to the SVG's `<metadata>` (`urn:embroidery-magic` namespace) and shown in the UI.
 
 ### Warnings
 
@@ -196,4 +196,4 @@ samples/                example inputs
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

@@ -87,7 +87,7 @@ def find_inkstitch() -> str | None:
 # Shown in the UI when Ink/Stitch isn't installed: how to export the SVG by hand.
 MANUAL_STEPS = [
     "Open the downloaded SVG in Inkscape (with Ink/Stitch installed).",
-    "Extensions › Ink/Stitch › Visualize and Export › Simulator — check the stitch-out.",
+    "Extensions › Ink/Stitch › Visualize and Export › Simulator to check the stitch-out.",
     "File › Save a Copy… and choose your machine's Ink/Stitch format (e.g. “Brother Embroidery Format (.pes)”).",
     "Copy the file to the machine over USB (most show up as a removable disk).",
 ]
@@ -187,7 +187,7 @@ def analyze_file(data: bytes, fmt: str = M.DEFAULT_FORMAT, expected_colors: int 
     x1, y1 = pts.max(0)
     w_mm, h_mm = (x1 - x0) / 10, (y1 - y0) / 10
     if not M.fits(w_mm, h_mm, hoop_w, hoop_h):
-        problems.append(f"Stitches span {w_mm:.1f}×{h_mm:.1f} mm — larger than the "
+        problems.append(f"Stitches span {w_mm:.1f}×{h_mm:.1f} mm, larger than the "
                         f"{M.hoop_label(hoop_w, hoop_h)} hoop.")
 
     # Walk the stitch list: color blocks, longest stitch, and in-color jumps (hand trims).

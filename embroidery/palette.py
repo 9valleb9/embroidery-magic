@@ -1,4 +1,4 @@
-"""Steps 2–3 — pick the thread palette with k-means and clean up the label map.
+"""Steps 2–3: pick the thread palette with k-means and clean up the label map.
 
 Where this sits in the flow:
 
@@ -94,7 +94,7 @@ def _to_lab(rgb: np.ndarray) -> np.ndarray:
 
 
 def _flat_mask(rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
-    """Pixels with low local variance — i.e. not on an anti-aliased edge.
+    """Pixels with low local variance, i.e. not on an anti-aliased edge.
 
     The variance is taken over a 5x5 window per RGB channel and the largest of
     the three is compared with ``FLAT_VARIANCE``. Pixels must also be fully
@@ -204,7 +204,7 @@ def analyze(rgb: np.ndarray, alpha: np.ndarray, n_colors: int | None = None,
         warns.append({
             "level": "warn", "code": "photo",
             "message": f"This looks like a photo or gradient ({distinct} distinct color groups). "
-                       "Embroidery needs flat colors — results will be posterized.",
+                       "Embroidery needs flat colors, so results will be posterized.",
         })
     elif max(fits) == 8 and fits[8][2] >= OFF_COLOR_SHARE:
         warns.append({
