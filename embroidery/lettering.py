@@ -492,15 +492,16 @@ def _repair_dots(labels: np.ndarray, seeds: list[tuple[int, int]], rep: Report) 
                          f"{diam:.1f} mm dot with {DOT_CLEARANCE_MM:g} mm clearance.")
 
 
-def _fill_corner_tips(labels: np.ndarray, rep: Report) -> None:
-    """Fill the points of sharp inside corners, per color, without merging shapes,
-    changing the number of shapes or touching counters. Edits ``labels`` in place."""
+def _fill_corner_tips(labels: np.ndarray, rep: Report, width_mm: float = TIP_FILL_MM) -> None:
+    """Fill the points of sharp inside corners narrower than ``width_mm`` (a closing),
+    per color, without merging shapes, changing the number of shapes or touching
+    counters. Edits ``labels`` in place."""
     filled = 0
     for c in np.unique(labels):
         if c == TRANSPARENT:
             continue
         m = labels == c
-        add = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_CLOSE, disk(TIP_FILL_MM)).astype(bool) & ~m
+        add = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_CLOSE, disk(width_mm)).astype(bool) & ~m
         add &= labels == TRANSPARENT
         if not add.any():
             continue
@@ -573,7 +574,8 @@ def apply(labels: np.ndarray, fx: Fixes, crop: bool = True) -> tuple[np.ndarray,
     if dots:
         _repair_dots(out, [(y + pad, x + pad) for y, x in dots], rep)
     if fx.fill_corner_tips:
-        _fill_corner_tips(out, rep)
+        # as wide as the narrowest gap the fabric keeps, so the gap check finds none left
+        _fill_corner_tips(out, rep, max(TIP_FILL_MM, fx.min_gap_mm))
 
     # specks the edits left behind (a corner cut off by a channel) aren't stitchable
     n, cc, st, _ = cv2.connectedComponentsWithStats((out != TRANSPARENT).astype(np.uint8), connectivity=8)

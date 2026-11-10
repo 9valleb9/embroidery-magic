@@ -56,7 +56,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
-from embroidery import export, fabrics, machines, pipeline
+from embroidery import edit, export, fabrics, machines, pipeline
 
 HERE = Path(__file__).parent
 HOST = os.environ.get("HOST", "127.0.0.1")
@@ -117,6 +117,22 @@ class PlanIn(BaseModel):
     fill_corner_tips: bool = False                        # fill the points of sharp inside corners
 
 
+class EditIn(BaseModel):
+    """Request body for ``/api/edit``: a hand edit to the session's shapes (mm on the
+    design). ``op`` is cut (x0, y0 -> x1, y1), rebuild (x, y on the piece), move (x, y on
+    the letter, dx, dy), undo or reset; see ``embroidery/edit.py``."""
+    session_id: str
+    op: str
+    x0: float = 0
+    y0: float = 0
+    x1: float = 0
+    y1: float = 0
+    x: float = 0
+    y: float = 0
+    dx: float = Field(0, ge=-20, le=20)
+    dy: float = Field(0, ge=-20, le=20)
+
+
 def _session(sid: str) -> pipeline.Session:
     """Look up a session, turning an expired or unknown id into HTTP 410 Gone."""
     try:
@@ -141,7 +157,8 @@ def logo():
 async def analyze(file: UploadFile = File(...), width_mm: float = Form(97), height_mm: float = Form(97),
                   hoop_w: float = Form(100), hoop_h: float = Form(100),
                   n_colors: str = Form("auto"), remove_bg: str = Form("auto"),
-                  sliver_mm: float = Form(pipeline.MORPH_DISK_MM)):
+                  sliver_mm: float = Form(pipeline.MORPH_DISK_MM),
+                  photo_mode: str = Form("auto"), restore_detail: bool = Form(False)):
     """Analyze an uploaded image and start a new session.
 
     Args:
@@ -157,6 +174,9 @@ async def analyze(file: UploadFile = File(...), width_mm: float = Form(97), heig
             keeps it.
         sliver_mm: Color bands narrower than this (0.1 to 2 mm) are absorbed into
             their neighbors.
+        photo_mode: ``"auto"`` cleans up a photo of a one-color logo when the upload
+            looks like a photo, ``"on"`` always, ``"off"`` never (``photo.clean``).
+        restore_detail: In photo clean-up, add back thin strokes a looser threshold finds.
 
     Returns:
         ``pipeline.session_payload`` for the new session (session id, palette, label
@@ -183,12 +203,15 @@ async def analyze(file: UploadFile = File(...), width_mm: float = Form(97), heig
                                  f"({machines.EDGE_MARGIN_MM:g} mm kept free at each edge for pull compensation).")
     if width_mm < 5 or height_mm < 5:
         raise HTTPException(400, "Size must be at least 5 mm.")
+    if photo_mode not in ("auto", "on", "off"):
+        raise HTTPException(400, "photo_mode must be auto, on or off.")
     if not (0.1 <= sliver_mm <= 2):
         raise HTTPException(400, "Sliver cleanup must be between 0.1 and 2 mm.")
     # Form fields arrive as strings; "auto" means let the palette step pick k.
     k = None if n_colors in ("", "auto") else int(n_colors)
     try:
-        s = pipeline.new_session(data, file.filename or "upload", width_mm, height_mm, k, remove_bg, sliver_mm)
+        s = pipeline.new_session(data, file.filename or "upload", width_mm, height_mm, k, remove_bg, sliver_mm,
+                                 photo_mode, restore_detail)
     except Exception as e:  # unreadable image, bad SVG, fully transparent, ...
         raise HTTPException(422, f"Couldn't read that image: {e}")
     return pipeline.session_payload(s)
@@ -241,6 +264,19 @@ def generate(req: PlanIn):
     """
     _check_req(req)
     return pipeline.generate(_session(req.session_id), req.model_dump())
+
+
+@app.post("/api/edit")
+def edit_shapes(req: EditIn):
+    """Apply a hand edit (split, rebuild an edge, move a letter, undo, reset) and return the
+    session payload again (new label map and size) with ``note``. 400 when the edit can't
+    be applied, e.g. a click that isn't on a letter."""
+    s = _session(req.session_id)
+    try:
+        note = pipeline.edit_session(s, req.model_dump())
+    except edit.EditError as e:
+        raise HTTPException(400, str(e))
+    return {**pipeline.session_payload(s), "note": note}
 
 
 @app.get("/api/machine")

@@ -64,12 +64,12 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from . import colors as C
-from . import lettering
+from . import edit, lettering, photo
 from . import fabrics as F
 from .palette import MORPH_DISK_MM, TRANSPARENT, analyze, edge_connected, frame_label
 from . import machines as M
 from .export import EST_STITCHES_PER_MM2, STITCH_WARN
-from .raster import PX_PER_MM, rasterize
+from .raster import PX_PER_MM, is_svg, rasterize
 from .svg_out import write_svg
 from .vectorize import (DOT_SPACING_MM, LINE_PARAMS, Satin, band, line_satin, mask_to_polygons, polygons, satin_params,
                         split_dots, space_tips, split_satin, split_strokes, split_thin, stitch_params)
@@ -132,6 +132,11 @@ class Session:
         background: ``{hex, share, removed}`` when an edge background was found.
         box_mm: The (w, h) box the design was fitted into; bolder strokes are scaled
             back to fit it.
+        history: Label maps before each hand edit (``edit_session``), for undo / reset.
+        last_cut: The last cut line ((x0, y0), (x1, y1)) in mm.
+        photo: Set when the upload was cleaned up as a photo of a one-color logo:
+            sampled and boosted ink colors with their nearest Brother threads, and the
+            possible lost detail count.
         _geom: Geometry cache, keyed by ``(sorted mapping items, thin_lines, satin, fixes)``.
     """
     id: str
@@ -144,6 +149,9 @@ class Session:
     warnings: list[dict]
     background: dict | None = None             # {hex, share, removed} when an edge background was found
     box_mm: tuple[float, float] | None = None
+    photo: dict | None = None                  # photo clean-up: ink / boosted color, nearest threads, lost detail
+    history: list = field(default_factory=list)    # label maps before each hand edit (undo)
+    last_cut: tuple | None = None              # the last cut line, for rebuilding its edge
     _geom: dict = field(default_factory=dict)
 
     def geometry(self, mapping: dict[int, int], thin_lines: bool = True, satin: bool = False,
@@ -190,7 +198,8 @@ def get_session(sid: str) -> Session:
 # ---------------------------------------------------------------- analysis
 
 def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
-                n_colors: int | None, remove_bg: str = "auto", sliver_mm: float = MORPH_DISK_MM) -> Session:
+                n_colors: int | None, remove_bg: str = "auto", sliver_mm: float = MORPH_DISK_MM,
+                photo_mode: str = "auto", restore_detail: bool = False) -> Session:
     """Rasterize and analyze an upload, then cache it as a new session.
 
     remove_bg: "auto"/"on" remove a detected edge background, "off" keeps it.
@@ -204,6 +213,9 @@ def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
         n_colors: Palette size, or ``None`` to let ``palette.analyze`` choose.
         remove_bg: See above.
         sliver_mm: See above.
+        photo_mode: "auto" cleans up a photo of a one-color logo (``photo.clean``)
+            when the analysis flags a photo; "on" always, "off" never.
+        restore_detail: Add back possible lost detail in photo clean-up.
 
     Returns:
         The new ``Session``. When a background is removed and the remaining subject is
@@ -220,6 +232,10 @@ def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
     """
     rgb, alpha, w_mm, h_mm = rasterize(data, filename, width_mm, height_mm)
     res = analyze(rgb, alpha, n_colors, sliver_mm)
+    is_photo = any(w["code"] == "photo" for w in res.warnings) or (
+        not is_svg(data, filename) and photo.looks_like_photo(data))
+    if photo_mode == "on" or (photo_mode == "auto" and is_photo):
+        return _photo_session(data, filename, width_mm, height_mm, rgb, alpha, w_mm, h_mm, res, restore_detail)
 
     background = None
     bg_id, share = frame_label(res.labels)
@@ -246,6 +262,72 @@ def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
     s = Session(id=uuid.uuid4().hex, filename=filename, labels=res.labels, hexes=res.hexes,
                 width_mm=w_mm, height_mm=h_mm, suggested_k=res.suggested_k, warnings=res.warnings,
                 background=background, box_mm=(width_mm, height_mm))
+    _SESSIONS[s.id] = s
+    while len(_SESSIONS) > _MAX_SESSIONS:
+        _SESSIONS.popitem(last=False)
+    return s
+
+
+MAX_UNDO = 30
+
+
+def edit_session(s: Session, op: dict) -> str:
+    """Apply a hand edit (``edit.apply_op``), or ``undo`` / ``reset``, to the session's
+    label map. Updates the design size, drops cached geometry, and returns a note.
+
+    Raises:
+        edit.EditError: For an edit that can't be applied (nothing to undo, a click off
+            the design, ...).
+    """
+    kind = op.get("op")
+    if kind in ("undo", "reset"):
+        if not s.history:
+            raise edit.EditError("Nothing to undo.")
+        s.labels = s.history.pop() if kind == "undo" else s.history[0]
+        if kind == "reset":
+            s.history.clear()
+        s.last_cut = None
+        note = "Undone." if kind == "undo" else "Back to the original shapes."
+    else:
+        labels, note, s.last_cut = edit.apply_op(s.labels, op, s.last_cut)
+        s.history.append(s.labels)
+        del s.history[:-MAX_UNDO]
+        s.labels = labels
+    h, w = s.labels.shape
+    s.width_mm, s.height_mm = round(w / PX_PER_MM, 2), round(h / PX_PER_MM, 2)
+    s._geom.clear()
+    return note
+
+
+def _photo_session(data, filename, width_mm, height_mm, rgb, alpha, w_mm, h_mm, res, restore) -> Session:
+    """A session from ``photo.clean``: one ink color, background removed, cropped to the
+    logo and re-rendered so it fills the requested size (as background removal does)."""
+    pr = photo.clean(rgb, alpha, restore)
+    ys, xs = np.nonzero(pr.labels != TRANSPARENT)
+    if not len(xs):
+        raise ValueError("Photo clean-up found no logo in the image.")
+    H, W = pr.labels.shape
+    m = 2
+    x0, y0, x1, y1 = max(0, xs.min() - m), max(0, ys.min() - m), min(W, xs.max() + 1 + m), min(H, ys.max() + 1 + m)
+    if (x1 - x0) < 0.98 * W or (y1 - y0) < 0.98 * H:
+        rgb, alpha, w_mm, h_mm = rasterize(data, filename, width_mm, height_mm,
+                                           crop=(x0 / W, y0 / H, x1 / W, y1 / H))
+        pr = photo.clean(rgb, alpha, restore)
+    warns = [w for w in res.warnings if w["code"] not in ("photo", "too_many_colors")]
+    warns.append({"level": "info", "code": "photo_cleanup", "message": " ".join(pr.notes)})
+    if pr.lost_detail:
+        warns.append({"level": "warn", "code": "lost_detail",
+                      "message": f"Possible lost detail: {pr.lost_detail} thin stroke piece(s) show up at a looser "
+                                 "threshold but not in the cleaned logo (an \"e\" crossbar, an \"h\" shoulder). "
+                                 "Use Restore detail to add them back.",
+                      "fixes": [{"type": "restore_detail", "label": "Restore detail"}]})
+    thread, boosted_thread = photo.nearest_thread(pr.ink_hex), photo.nearest_thread(pr.boosted_hex)
+    background = {"hex": pr.background_hex, "share": 1.0, "removed": True}
+    s = Session(id=uuid.uuid4().hex, filename=filename, labels=pr.labels, hexes=[pr.ink_hex],
+                width_mm=w_mm, height_mm=h_mm, suggested_k=1, warnings=warns, background=background,
+                box_mm=(width_mm, height_mm),
+                photo={"ink_hex": pr.ink_hex, "boosted_hex": pr.boosted_hex, "thread": thread,
+                       "boosted_thread": boosted_thread, "lost_detail": pr.lost_detail, "restored": pr.restored})
     _SESSIONS[s.id] = s
     while len(_SESSIONS) > _MAX_SESSIONS:
         _SESSIONS.popitem(last=False)
@@ -292,7 +374,7 @@ def session_payload(s: Session) -> dict:
         the palette (id, hex, area in mm², share of the design), default merges
         (``auto_merge``), detected background, ``label_png`` (the label map as a
         grayscale PNG data URL for live recoloring in the browser), analysis warnings
-        and stitch-mode recommendations.
+        stitch-mode recommendations, and ``photo`` (``Session.photo``, or None).
     """
     counts = np.bincount(s.labels.ravel(), minlength=256)
     px_mm2 = PX_PER_MM ** 2
@@ -310,6 +392,8 @@ def session_payload(s: Session) -> dict:
         "label_png": _label_png(s.labels),
         "warnings": s.warnings,
         "recommend": recommend(s, _auto_merge(s.hexes, counts)),
+        "photo": s.photo,
+        "edits": len(s.history),
     }
 
 
@@ -804,6 +888,9 @@ def generate(s: Session, req: dict) -> dict:
         plan["warnings"].append({"level": "info", "code": "scaled_to_fit",
                                  "message": f"Bolder strokes made the design bigger, so it was scaled to "
                                             f"{f * 100:.1f}% to stay within {s.box_mm[0]:g} × {s.box_mm[1]:g} mm."})
+    # the artwork's own shapes at the final size: a narrow strip of fabric between two
+    # stitch pieces of one solid shape is a seam that should close, not a design gap
+    art = geom.labels != TRANSPARENT
     # a view of the session at the final size, for the checks below
     s = replace(s, width_mm=W, height_mm=H, labels=np.broadcast_to(np.uint8(0), (round(H * PX_PER_MM), round(W * PX_PER_MM))))
     _order_shapes(layers, Point(s.width_mm / 2, s.height_mm / 2))
@@ -822,8 +909,10 @@ def generate(s: Session, req: dict) -> dict:
             "needle": fab["needle"]}
     svg = write_svg(hoop_w, hoop_h, placed, meta)
     # Checks run on the unplaced layers, i.e. in design coordinates matching s.labels.
+    if art.shape != s.labels.shape:
+        art = cv2.resize(art.astype(np.uint8), s.labels.shape[::-1], interpolation=cv2.INTER_NEAREST).astype(bool)
     preview, preview_marked, geo_warnings = _render_and_check(s, layers, fabric,
-                                                              fab.get("min_gap_mm", NARROW_GAP_MM))
+                                                              fab.get("min_gap_mm", NARROW_GAP_MM), art)
     if max(s.width_mm - hoop_w, s.height_mm - hoop_h) + 2 * pull > 0:
         geo_warnings.append({"level": "warn", "code": "hoop_edge",
                              "message": f"With {pull:g} mm pull compensation the stitches reach past the "
@@ -1102,7 +1191,8 @@ def _disk(mm: float) -> np.ndarray:
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))
 
 
-def _render_and_check(s: Session, layers: list[dict], fabric_hex: str, gap_mm: float = NARROW_GAP_MM):
+def _render_and_check(s: Session, layers: list[dict], fabric_hex: str, gap_mm: float = NARROW_GAP_MM,
+                      art: np.ndarray | None = None):
     """Paint the stitched preview and flag areas that won't stitch well.
 
     Layers are painted in stitch order over the fabric color at the label map's
@@ -1122,6 +1212,9 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str, gap_mm: f
         layers: Final layers in design coordinates (not yet centered on the hoop).
         fabric_hex: Fabric color for the background.
         gap_mm: Narrowest fabric gap that survives stitching (wider on knits).
+        art: The artwork's shapes (bool, canvas size). Narrow fabric that is mostly ink
+            in the artwork is a seam between stitch pieces, not a gap in the design, so
+            it isn't counted (it closing up is what should happen).
 
     Returns:
         (preview PNG data URL, marked preview PNG data URL, list of warnings). Previews
@@ -1163,6 +1256,8 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str, gap_mm: f
 
     fabric_mask = (covered == 0).astype(np.uint8)
     gaps = fabric_mask.astype(bool) & ~cv2.morphologyEx(fabric_mask, cv2.MORPH_OPEN, _disk(gap_mm)).astype(bool)
+    if art is not None:
+        gaps &= ~art
     cc, long_ids, tip_ids = _long_components(gaps, 0.1 * px2)
     tips += len(tip_ids)
     gap_mask = np.isin(cc, long_ids)

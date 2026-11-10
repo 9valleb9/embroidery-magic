@@ -26,6 +26,10 @@ Supporting modules used throughout:
 - ``colors``: hex/Lab conversion, ΔE2000 and the thresholds built on it, thread layer
   names, fabric presets, bobbin choice and contrast fixes.
 - ``machines``: file formats by brand, standard hoop sizes, hoop fit and orientation.
+- ``edit``: hand edits to a session's shapes (cut touching letters, rebuild a cut
+  edge, move a letter with the rest of its word), from ``/api/edit``.
+- ``photo``: clean-up of a photo of a one-color logo (used instead of the palette step
+  for photos), ink color estimate and nearest Brother thread.
 - ``fabrics``: fabric-type profiles (pull compensation, row spacing, underlay,
   stabilizer, needle, notes and limits).
 

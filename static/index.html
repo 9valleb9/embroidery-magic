@@ -30,6 +30,8 @@
     POST /api/plan               JSON plan request (see planRequest()). Color
                                  decisions only (fabric knockouts, order,
                                  warnings, summary); cheap, called on every edit.
+    POST /api/edit               Hand edit to the shapes (cut, rebuild, move, undo,
+                                 reset); returns the new label map and size.
     POST /api/generate           Same body. Returns the Ink/Stitch SVG, preview
                                  PNGs (stitched and problem areas), warnings,
                                  layers, summary, machine estimates and fabric
@@ -134,6 +136,7 @@
                   font-weight: 600; color: var(--muted); }
   .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
   .tabs button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  [data-edit].on { background: var(--ink); color: #fff; border-color: var(--ink); }
   .tabs button.locked { opacity: .45; cursor: help; }
   details.stitch { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
   details.stitch summary { cursor: pointer; font-weight: 600; font-size: 13px; }
@@ -211,6 +214,15 @@
       <input type="number" id="h" value="97" min="5" step="1" aria-label="Height mm">
     </div>
     <div class="hint" id="actualSize">The design is fitted inside this box (aspect ratio kept) and centered in the hoop.</div>
+
+    <div id="photoBox" hidden>
+      <label class="field" style="display:flex;gap:8px;align-items:center;font-weight:600">
+        <input type="checkbox" id="photoClean"> Clean up photo of a logo</label>
+      <div class="hint" id="photoHint">Treats the image as a photo of a one-color logo: removes fabric texture and noise,
+        keeps thin strokes connected and smooths the outlines.</div>
+      <label class="hint" id="restoreBox" hidden style="display:flex;gap:8px;align-items:center;color:var(--ink)">
+        <input type="checkbox" id="restoreDetail"> Restore lost detail</label>
+    </div>
 
     <div id="bgBox" hidden>
       <label class="field" style="display:flex;gap:8px;align-items:center;font-weight:600">
@@ -314,6 +326,20 @@
       <span class="badge" id="stageBadge" hidden></span>
       <div class="stale" id="stale" hidden>Settings changed: generate again</div>
     </div>
+    <div id="editBar" hidden style="margin-top:10px">
+      <div class="row" style="flex-wrap:wrap;gap:6px;align-items:center">
+        <span class="hint" style="margin:0;flex:0;white-space:nowrap">Edit letters</span>
+        <button class="small" data-edit="cut" title="Drag a line across where two letters touch">Cut</button>
+        <button class="small" data-edit="rebuild" title="After a cut, click the piece whose cut edge to rebuild">Rebuild edge</button>
+        <button class="small" data-edit="move" title="Click a letter, then nudge it; the rest of its word moves too">Move</button>
+        <button class="small" id="nudgeL" hidden title="Move left 0.25 mm">◀</button>
+        <button class="small" id="nudgeR" hidden title="Move right 0.25 mm">▶</button>
+        <button class="small" id="editUndo">Undo</button>
+        <button class="small" id="editReset">Reset</button>
+      </div>
+      <div class="hint" id="editHint">For letters that touch or overlap in the artwork: cut them apart, rebuild a
+        sliced edge, and move a letter (the rest of its word moves with it).</div>
+    </div>
     <div style="margin-top:12px"><button class="primary" id="generate" disabled>Generate SVG</button></div>
     <div id="out" hidden>
       <h3>Warnings</h3>
@@ -409,6 +435,9 @@ const state = {
   stitch: { overlap: 0.3, pull: 0.2, sliver: 0.35 },
   fabricType: "cotton",
   letter: { bolder: 0, repairDots: true, fillTips: false },
+  photoMode: "auto", restoreDetail: false,
+  editMode: null,        // null | "cut" | "rebuild" | "move": live preview clicks edit the shapes
+  movePoint: null,       // [x, y] mm on the letter picked for Move
   labelUrl: null,        // the label map drawLive shows (the session's, or the plan's edited one)
 };
 const STITCH_DEFAULTS = { overlap: 0.3, pull: 0.2, sliver: 0.35 };
@@ -501,6 +530,7 @@ $("file").addEventListener("change", (e) => e.target.files[0] && setFile(e.targe
 function setFile(f) {
   state.file = f;
   state.removeBg = "auto";
+  state.photoMode = "auto"; state.restoreDetail = false;
   state.applyRecommend = true;   // a new image gets the stitch options that suit it
   if (!sizeOk()) return;
   const url = URL.createObjectURL(f);
@@ -553,6 +583,8 @@ async function analyze() {
   fd.append("hoop_h", state.machine.hoopH);
   fd.append("n_colors", $("k").value);
   fd.append("remove_bg", state.removeBg);
+  fd.append("photo_mode", state.photoMode);
+  fd.append("restore_detail", state.restoreDetail);
   $("generate").disabled = true;
   $("paletteEmpty").textContent = "Analyzing colors…";
   $("paletteEmpty").hidden = false;
@@ -566,7 +598,8 @@ async function analyze() {
     state.prevFabric = null; state.result = null; state.export = null;
     lockTabs([]); if (state.tab !== "live") state.tab = "live";
     $("actualSize").textContent = `Your design: ${s.width_mm} × ${s.height_mm} mm · hoop ${state.machine.hoopW} × ${state.machine.hoopH} mm (centered)`;
-    renderBackground(s.background);
+    renderBackground(s.photo ? null : s.background);
+    renderPhoto(s);
     $("kHint").textContent = `Suggested: ${s.suggested_k} color${s.suggested_k === 1 ? "" : "s"}` + ($("k").value === "auto" ? "" : ` (using ${s.k})`);
     if (state.applyRecommend && s.recommend) {
       state.thinLines = s.recommend.thin_lines; state.satin = s.recommend.satin;
@@ -596,6 +629,29 @@ function renderBackground(bg) {
       ? "It's removed (never stitched) and the design is cropped to fill your size. Same-colored areas inside the design are kept."
       : "It's kept as part of the design, e.g. for a patch.");
 }
+/**
+ * Show the photo clean-up controls: the toggle whenever the upload is a raster image that
+ * was (or could be) treated as a photo, and Restore lost detail when clean-up found some.
+ * @param {object} s  The /api/analyze payload.
+ */
+function renderPhoto(s) {
+  const p = s.photo;
+  $("photoBox").hidden = !(p || state.photoMode === "off" || s.warnings.some(w => w.code === "photo"));
+  $("photoClean").checked = !!p;
+  $("restoreBox").hidden = !(p && (p.lost_detail || p.restored));
+  $("restoreDetail").checked = state.restoreDetail;
+  $("photoHint").textContent = p
+    ? `Cleaned up as a photo of a one-color logo.${p.lost_detail ? ` ${p.lost_detail} thin stroke piece(s) may be lost: tick Restore lost detail.` : ""}${p.restored ? ` Restored ${p.restored} piece(s).` : ""}`
+    : "Treats the image as a photo of a one-color logo: removes fabric texture and noise, keeps thin strokes connected and smooths the outlines.";
+}
+$("photoClean").addEventListener("change", (e) => {
+  state.photoMode = e.target.checked ? "on" : "off"; state.restoreDetail = false;
+  if (state.file && sizeOk()) analyze();
+});
+$("restoreDetail").addEventListener("change", (e) => {
+  state.restoreDetail = e.target.checked;
+  if (state.file && sizeOk()) analyze();
+});
 $("removeBg").addEventListener("change", (e) => {
   state.removeBg = e.target.checked ? "on" : "off";
   if (state.file && sizeOk()) analyze();
@@ -671,7 +727,8 @@ async function refreshPlan() {
     // merged colors follow their target
     for (const c of state.colors) if (c.merged_into != null) c.was_fabric = null;
     // bolder strokes / repaired dots change the shapes: preview the edited label map
-    const url = p.lettering?.label_png || state.session.label_png;
+    // (but while editing letters, show the session's own shapes, which clicks refer to)
+    const url = (!state.editMode && p.lettering?.label_png) || state.session.label_png;
     if (url !== state.labelUrl) { await loadLabels(url); state.labelUrl = url; }
     showError(null);
   } catch (e) { showError(e); }
@@ -704,6 +761,7 @@ function renderThreads() {
   $("satinBox").hidden = !p;
   $("stitchBox").hidden = !p;
   $("letterBox").hidden = !p;
+  $("editBar").hidden = !p;
   if (!p) { ul.innerHTML = ""; return; }
   $("orderMode").textContent = p.order_source === "user" ? "custom order" : "suggested order";
   $("resetOrder").hidden = p.order_source !== "user";
@@ -724,6 +782,7 @@ function renderThreads() {
         <div class="name" title="${esc(d.layer_name)}">${esc(d.layer_name)}</div>
         <div class="sub"><input class="hex" value="${d.hex}" data-act="hex" spellcheck="false">
           ${d.area_mm2} mm² · ΔE ${d.delta_e} ${status}</div>
+        ${photoColors(d)}
         ${merged.map(m => `<div class="merged"><i style="background:${m.origHex}"></i>merged ${m.origHex}
           <button class="small" data-act="unmerge" data-mid="${m.id}">unmerge</button></div>`).join("")}
       </div>
@@ -768,6 +827,22 @@ function renderRecommend() {
   if (r) $("recHint").textContent = r.why + (state.satin === r.satin ? "" : " (you changed it)");
 }
 
+/**
+ * For a photo clean-up, the color choices under the thread row: the sampled ink color and
+ * a boosted one (same hue, more saturated: cameras wash colors out), each with its
+ * nearest Brother thread. Empty for other uploads.
+ * @param {object} d  The plan's color decision.
+ * @returns {string} HTML.
+ */
+function photoColors(d) {
+  const p = state.session?.photo;
+  if (!p || d.id !== 0) return "";
+  const opt = (label, hx, t) => `<button class="small" data-act="usehex" data-hex="${hx}" title="Use ${hx}">
+    <i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${hx};vertical-align:-1px"></i>
+    ${label} ${hx} (≈ ${esc(t.name)})</button>`;
+  return `<div class="merged" style="flex-wrap:wrap;gap:4px">${opt("Sampled", p.ink_hex, p.thread)} ${opt("Boosted", p.boosted_hex, p.boosted_thread)}
+    <span>Photo colors are estimates.</span></div>`;
+}
 const ul = $("threads");
 /** Thread row buttons: Stitch, Fabric, reset to auto, unmerge. */
 ul.addEventListener("click", (e) => {
@@ -778,6 +853,7 @@ ul.addEventListener("click", (e) => {
   else if (act === "fabric") c.fabric = true;
   else if (act === "auto") c.fabric = null;
   else if (act === "unmerge") { const m = state.colors.find(x => x.id === +b.dataset.mid); m.merged_into = null; if (state.order) state.order.push(m.id); }
+  else if (act === "usehex") c.hex = b.dataset.hex;
   else return;
   refreshPlan();
 });
@@ -864,6 +940,7 @@ document.addEventListener("click", (e) => {
   if (f.type === "swap") { state.colors.find(c => c.id === f.color_id).hex = f.hex; }
   else if (f.type === "outline") state.outlines.add(f.color_id);
   else if (f.type === "border") state.border = true;
+  else if (f.type === "restore_detail") { state.restoreDetail = true; analyze(); return; }
   refreshPlan().then(() => { if (state.result) generate(); });
 });
 
@@ -887,9 +964,92 @@ $("bolder").addEventListener("change", () => refreshPlan());
 $("repairDots").addEventListener("change", (e) => { state.letter.repairDots = e.target.checked; refreshPlan(); });
 $("fillTips").addEventListener("change", (e) => { state.letter.fillTips = e.target.checked; refreshPlan(); });
 
+// ------------------------------------------------------------------ edit letters
+/**
+ * Live preview canvas position -> design mm (the label map is centered on the canvas).
+ * @param {MouseEvent} e
+ * @returns {number[]} [x, y] in mm.
+ */
+function canvasMm(e) {
+  const cv = $("live"), r = cv.getBoundingClientRect();
+  const cx = (e.clientX - r.left) * cv.width / r.width, cy = (e.clientY - r.top) * cv.height / r.height;
+  const { width, height } = state.labelData, s = liveSize();
+  const pxmm = width / s.width_mm;
+  return [(cx - Math.round((cv.width - width) / 2)) / pxmm, (cy - Math.round((cv.height - height) / 2)) / pxmm];
+}
+/** Draw the line being cut over the live preview, in design mm. */
+function drawCutLine(a, b) {
+  drawLive();
+  const cv = $("live"), ctx = cv.getContext("2d"), { width, height } = state.labelData;
+  const pxmm = width / liveSize().width_mm, ox = Math.round((cv.width - width) / 2), oy = Math.round((cv.height - height) / 2);
+  ctx.setLineDash([]); ctx.strokeStyle = "#e0245e"; ctx.lineWidth = Math.max(2, cv.width / 400);
+  ctx.beginPath(); ctx.moveTo(ox + a[0] * pxmm, oy + a[1] * pxmm); ctx.lineTo(ox + b[0] * pxmm, oy + b[1] * pxmm); ctx.stroke();
+}
+/**
+ * Send one edit to /api/edit and take the session's new shapes (label map and size);
+ * the plan and preview refresh. Errors (a click off the letters) show in the hint.
+ * @param {object} op  {op, ...coordinates in mm}
+ */
+async function sendEdit(op) {
+  try {
+    const r = await api("/api/edit", json({ session_id: state.session.session_id, ...op }));
+    Object.assign(state.session, { label_png: r.label_png, width_mm: r.width_mm, height_mm: r.height_mm, edits: r.edits });
+    $("editHint").textContent = r.note;
+    $("actualSize").textContent = `Your design: ${r.width_mm} × ${r.height_mm} mm · hoop ${state.machine.hoopW} × ${state.machine.hoopH} mm (centered)`;
+    await loadLabels(r.label_png); state.labelUrl = r.label_png;
+    await refreshPlan();
+    return true;
+  } catch (e) { $("editHint").textContent = e.message || String(e); return false; }
+}
+/** Pick an edit mode (clicking the active one again turns it off). */
+function setEditMode(m) {
+  state.editMode = state.editMode === m ? null : m;
+  document.querySelectorAll("[data-edit]").forEach(b => b.classList.toggle("on", b.dataset.edit === state.editMode));
+  $("nudgeL").hidden = $("nudgeR").hidden = state.editMode !== "move" || !state.movePoint;
+  $("live").style.cursor = state.editMode ? "crosshair" : "";
+  $("editHint").textContent = { cut: "Drag a line across where two letters touch or overlap.",
+    rebuild: "Click the piece beside your last cut whose edge the cut sliced.",
+    move: "Click right on a letter, then nudge it with ◀ ▶. The rest of its word moves with it." }[state.editMode]
+    || "For letters that touch or overlap in the artwork: cut them apart, rebuild a sliced edge, and move a letter (the rest of its word moves with it).";
+  if (state.tab !== "live") showTab("live");
+  refreshPlan();
+}
+document.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () => setEditMode(b.dataset.edit)));
+let cutStart = null;
+$("live").addEventListener("mousedown", (e) => { if (state.editMode === "cut") cutStart = canvasMm(e); });
+$("live").addEventListener("mousemove", (e) => { if (state.editMode === "cut" && cutStart) drawCutLine(cutStart, canvasMm(e)); });
+$("live").addEventListener("mouseup", async (e) => {
+  if (state.editMode === "cut" && cutStart) {
+    const [a, b] = [cutStart, canvasMm(e)]; cutStart = null;
+    if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 0.3) { drawLive(); return; }
+    await sendEdit({ op: "cut", x0: a[0], y0: a[1], x1: b[0], y1: b[1] });
+  } else if (state.editMode === "rebuild") {
+    const [x, y] = canvasMm(e);
+    await sendEdit({ op: "rebuild", x, y });
+  } else if (state.editMode === "move") {
+    // picking a letter only needs to land on ink; the server checks when nudging
+    const [x, y] = canvasMm(e);
+    const { width, data } = state.labelData, pxmm = width / liveSize().width_mm;
+    const i = (Math.round(y * pxmm) * width + Math.round(x * pxmm)) * 4;
+    if (x < 0 || y < 0 || x * pxmm >= width || data[i] === 255) { $("editHint").textContent = "That spot isn't on a letter. Click right on the letter you want to move."; return; }
+    state.movePoint = [x, y];
+    $("nudgeL").hidden = $("nudgeR").hidden = false;
+    $("editHint").textContent = "Letter picked. Nudge it with ◀ ▶.";
+  }
+});
+for (const [id, dx] of [["nudgeL", -0.25], ["nudgeR", 0.25]]) {
+  $(id).addEventListener("click", async () => {
+    if (!state.movePoint) return;
+    const [x, y] = state.movePoint;
+    if (await sendEdit({ op: "move", x, y, dx })) state.movePoint = [x + dx, y];
+  });
+}
+$("editUndo").addEventListener("click", () => sendEdit({ op: "undo" }));
+$("editReset").addEventListener("click", () => { state.movePoint = null; sendEdit({ op: "reset" }); });
+
 // ------------------------------------------------------------------ live preview
 /** Size of the design the live preview shows: the plan's edited shapes (bolder strokes) when there are any. */
-const liveSize = () => state.plan?.lettering?.label_png ? state.plan.lettering : state.session;
+const liveSize = () => !state.editMode && state.plan?.lettering?.label_png ? state.plan.lettering : state.session;
 /**
  * Draw the live preview canvas: the fabric-colored hoop field (turned to match the
  * design when that's how it fits), the label map recolored through a palette-id lookup table

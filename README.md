@@ -77,6 +77,8 @@ Sample inputs are in `samples/`: the mountain badge above, a flat 3-color logo, 
 3. **Edit the threads.** You can change a color's hex, **Merge into…** another color, toggle **Stitch / Fabric**, and drag rows to set the stitch order. Colors within ΔE2000 < 8 of the fabric are knocked out automatically, and *reset to auto* undoes a manual override.
 4. **Generate.** You get a stitched preview, a *Problem areas* view (red = fabric gaps < 0.6 mm, orange = stitched areas < 1 mm wide), warnings with one-click fixes, a **Before you stitch** box (stabilizer, needle, topping, the settings the fabric applied, and notes about this design), a summary (fabric, bobbin, thread list) and the SVG download.
 
+**Clean up photo of a logo** (shown for photos, on automatically when the upload has camera noise or fabric texture): treats the image as a photo of a one-color logo, like vinyl on a beanie. It denoises, measures how far each pixel is from the background color, picks a threshold that keeps thin strokes connected (Otsu, lowered while that joins broken strokes without bloating the ink), smooths each outline along its length instead of blurring the image (which would round corners and thin hairlines), and removes specks and pinholes under 0.3 mm². If a looser threshold finds thin strokes that the cleaned logo lost (an "e" crossbar, an "h" shoulder), a *possible lost detail* warning offers **Restore lost detail**, which adds just those strokes back. The thread row shows the sampled ink color and a *boosted* one (same hue, more saturated, since lighting and the camera wash colors out), each with its nearest Brother thread. Photo colors are estimates.
+
 **Remove background** (shown when one color fills most of the image's edge, on by default): the region of that color connected to the image edge (found by flood fill) is never stitched, and the design is cropped to fill your size. Areas of the same color *inside* the design stay a normal thread color (e.g. white parts of a logo on navy fabric). Turn it off for full-frame designs like patches.
 
 **Stitch thin lines as outlines** (thread panel, on by default): features under 1 mm wide, such as a logo's outline, can't hold a fill. Their centerline (skeleton) is stitched as a triple (bean) running stitch in the same color: `inkstitch:stroke_method="running_stitch"`, `bean_stitch_repeats="1"`, 2 mm stitches. Line pieces that meet are joined into continuous runs and stitched next to the fills they touch. Short thin bits (corner slivers under 2 mm) stay part of the fill. It usually adds a few hand trims; turn it off to compare.
@@ -101,6 +103,13 @@ Sample inputs are in `samples/`: the mountain badge above, a flat 3-color logo, 
   - the number of separate shapes is checked afterwards, and the design is scaled back into your size if it grew past it (every check then runs on the scaled result).
 - **Round dots** (on by default): a dash, or a dot that crowds its stem, above an i or j is redrawn as a round dot 1.05 × the stem's width, centered over the stem with 1 mm of space around it.
 - **Fill corner tips**: closes the points of sharp inside corners, which narrow to nothing and can't be stitched, without joining shapes or shrinking a counter.
+
+**Edit letters** (under the live preview): for logos where letters touch or overlap in the artwork (an "m" running into an "S", a "t" touching an "h"), which merge into one blob in thread.
+
+- **Cut**: drag a line across where they touch. It clears a 0.4 mm line through the ink, splitting the shape.
+- **Rebuild edge**: click the piece beside the cut whose stroke the cut sliced. Its visible half near the cut is mirrored across the cut line, rebuilding the hidden edge at the stroke's full width, without coming closer than 0.4 mm to anything on the other side.
+- **Move**: click right on a letter (a click on background is an error, not a silent no-op), then nudge it with ◀ ▶ in 0.25 mm steps. The letters after it in the same word move with it (a word ends at a gap wider than 2 mm and 1.8 × the line's usual letter spacing), so the word's spacing stays as it was.
+- **Undo** and **Reset** step back through the edits. Edits change the shapes everything else works from (bolder strokes, satins, checks).
 
 ### Fabric types
 
@@ -195,6 +204,8 @@ app.py                  FastAPI server + `python app.py` entry point
 embroidery/raster.py    rasterize + SVG sanitizing
 embroidery/palette.py   k-means palette, label-map cleanup, photo detection
 embroidery/vectorize.py contours -> polygons, stitch settings, outline bands, satin columns
+embroidery/edit.py      hand edits: cut touching letters, rebuild a cut edge, move a letter and its word
+embroidery/photo.py     photo of a one-color logo -> clean flat mask, ink color estimate
 embroidery/lettering.py bolder strokes (with gap / counter / pocket protection), dot repair, corner tips
 embroidery/colors.py    Lab / ΔE2000, thread names, bobbin, contrast swaps
 embroidery/pipeline.py  sessions, fabric decisions, stitch order, generation, preview + gap checks
