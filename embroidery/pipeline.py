@@ -890,7 +890,7 @@ def generate(s: Session, req: dict) -> dict:
                                             f"{f * 100:.1f}% to stay within {s.box_mm[0]:g} × {s.box_mm[1]:g} mm."})
     # the artwork's own shapes at the final size: a narrow strip of fabric between two
     # stitch pieces of one solid shape is a seam that should close, not a design gap
-    art = geom.labels != TRANSPARENT
+    art = np.isin(geom.labels, stitched)               # colors left as fabric don't count
     # a view of the session at the final size, for the checks below
     s = replace(s, width_mm=W, height_mm=H, labels=np.broadcast_to(np.uint8(0), (round(H * PX_PER_MM), round(W * PX_PER_MM))))
     _order_shapes(layers, Point(s.width_mm / 2, s.height_mm / 2))
