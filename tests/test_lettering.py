@@ -122,3 +122,19 @@ def test_tight_letter_is_widened_and_the_next_letter_moves():
     inside = runs[1][0] - runs[0][-1] - 1
     gap = runs[2][0] - runs[1][-1] - 1
     assert inside >= 0.95 * P and abs(gap - (17 - 14.6) * P) <= 2
+
+
+def test_open_gaps_widens_narrow_gaps_but_not_wedges():
+    """Two bars 0.5 mm apart get a 0.8 mm gap; the wedge of a V (two strokes meeting at a
+    shallow angle) is a corner tip and is left alone."""
+    lab = canvas(50, 30)
+    cv2.rectangle(lab, mm(5, 5), mm(15, 25), 0, -1)
+    cv2.rectangle(lab, mm(15.5, 5), mm(25, 25), 0, -1)            # 0.5 mm gap
+    v = np.array([mm(30, 5), mm(33, 5), mm(37, 20), mm(41, 5), mm(44, 5), mm(38.5, 25), mm(35.5, 25)], np.int32)
+    cv2.fillPoly(lab, [v], 0)
+    before_v = (lab[:, mm(29)[0]:] != TRANSPARENT).sum()
+    out, rep = L.apply(lab, L.Fixes(repair_dots=False, open_gaps=True), crop=False)
+    row = np.flatnonzero(out[mm(15)[0], :mm(28)[0]] != TRANSPARENT)
+    gap = np.diff(row).max() - 1
+    assert gap >= 0.8 * P and shapes(out) == 3
+    assert (out[:, mm(29)[0]:] != TRANSPARENT).sum() == before_v      # the V's crotch untouched

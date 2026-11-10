@@ -501,6 +501,7 @@ SATIN_NARROW_MM = 0.7      # strokes this wide up to SATIN_MIN_MM are widened to
 SATIN_BRIDGE_MM = 3.0      # a column carries on through a thinner dip up to this long, at SATIN_MIN_MM
 SATIN_KEEP_BIT_MM2 = 0.3   # compact leftovers this big are kept even when thinner than SATIN_SLIVER_MM
 SATIN_KEEP_BIT_LONG_MM = 2.5   # ... if no longer than this (edge strips along a column are longer)
+GAP_KEEP_MM = 0.8          # satin edges stay out of fabric gaps narrower than this
 SATIN_SLIVER_MM = 0.5      # leftovers narrower than this along a column are its edge, not a fill
 
 
@@ -615,6 +616,12 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
     lo, hi = SATIN_MIN_MM * PX_PER_MM, SATIN_MAX_MM * PX_PER_MM
     # 3 px of slack: a stroke widened to SATIN_MIN_MM spills up to 0.15 mm per side
     allowed = cv2.dilate(m8, np.ones((7, 7), np.uint8)).astype(bool)
+    # fabric gaps narrower than GAP_KEEP_MM: a column's edge must not spill into them, or
+    # the stitches close a gap the artwork keeps open
+    bg = (~mask).astype(np.uint8)
+    gapzone = ~mask.astype(bool)
+    gapzone &= ~cv2.morphologyEx(bg, cv2.MORPH_OPEN, cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (round(GAP_KEEP_MM * PX_PER_MM) | 1,) * 2)).astype(bool)
     covered = np.zeros_like(m8)
     out = []
     for run in _join_smooth(chains):
@@ -652,7 +659,7 @@ def split_satin(mask: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
                 continue
             # an end is a free tip only if this stretch reaches the run's end and nothing else meets there
             tips = (start == 0 and ends[run[0]] == 1, j == len(run) and ends[run[-1]] == 1)
-            sat = _column(seg, ws, tips, mask)
+            sat = _column(seg, ws, tips, mask, gapzone)
             if sat is None:
                 continue
             pm = np.zeros_like(m8)
@@ -943,7 +950,7 @@ def _fill_mm(mask: np.ndarray, poly: Polygon) -> None:
 
 
 def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, False),
-            mask: np.ndarray | None = None) -> Satin | None:
+            mask: np.ndarray | None = None, gapzone: np.ndarray | None = None) -> Satin | None:
     """Skeleton pixels + stroke widths (px) -> a satin column with paired rail nodes.
     tips: which ends are a stroke's free end (tapered) rather than a junction (run in full).
 
@@ -1016,6 +1023,8 @@ def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, Fal
             else:
                 c = np.vstack([c[:-1], tc]); nrm = np.vstack([nrm[:-1], tn]); tan = np.vstack([tan[:-1], tt])
                 rl = np.concatenate([rl[:-1], tl]); rr = np.concatenate([rr[:-1], tr])
+    if gapzone is not None:
+        rl, rr = _keep_out(gapzone, c, nrm, rl), _keep_out(gapzone, c, -nrm, rr)
     left, right = c + nrm * rl[:, None], c - nrm * rr[:, None]
     keep = [0]
     for i in range(1, len(c)):                # drop node pairs that fold back on a tight inner curve
@@ -1030,6 +1039,22 @@ def _column(seg: list, widths: np.ndarray, tips: tuple[bool, bool] = (False, Fal
         return Satin(rail1, rail2, float(np.median(widths)) / PX_PER_MM)
     except ValueError:                         # degenerate outline
         return None
+
+
+def _keep_out(zone: np.ndarray, c: np.ndarray, nrm: np.ndarray, r: np.ndarray) -> np.ndarray:
+    """Shorten each rung end (``c + nrm * r``) that lands in ``zone`` (a narrow fabric
+    gap) back toward the center, in half-pixel steps, until it's out of the zone."""
+    h, w = zone.shape
+    r = r.copy()
+    step = 0.5 / PX_PER_MM
+    for i in range(len(r)):
+        while r[i] > step:
+            x, y = c[i] + nrm[i] * r[i]
+            px, py = int(round(x * PX_PER_MM - 0.5)), int(round(y * PX_PER_MM - 0.5))
+            if not (0 <= px < w and 0 <= py < h and zone[py, px]):
+                break
+            r[i] -= step
+    return r
 
 
 def _edge_dist(mask: np.ndarray, c: np.ndarray, nrm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

@@ -68,6 +68,8 @@ class Fixes:
             Used when ``bolder_mm`` is 0.
         repair_dots: Redraw dashes and crowded dots above stems as round dots.
         fill_corner_tips: Fill the points of sharp inside corners.
+        open_gaps: Widen gaps narrower than ``min_gap_mm`` (between letters, inside
+            counters, between serifs) to ``min_gap_mm`` by trimming the shapes beside them.
         min_gap_mm: Gap kept between separate shapes while growing.
         min_inside_mm: Channel kept through counters and pockets while growing.
     """
@@ -75,6 +77,7 @@ class Fixes:
     bolder_pct: float = 0.0
     repair_dots: bool = True
     fill_corner_tips: bool = False
+    open_gaps: bool = False
     min_gap_mm: float = 0.8
     min_inside_mm: float = 1.0
 
@@ -521,6 +524,55 @@ def _fill_corner_tips(labels: np.ndarray, rep: Report, width_mm: float = TIP_FIL
         rep.notes.append(f"Filled {filled} corner tip(s).")
 
 
+def _open_gaps(labels: np.ndarray, width_mm: float, rep: Report) -> None:
+    """Widen every gap narrower than ``width_mm`` (at least 1 mm long and not a wedge
+    open at one end only, so corner tips don't count) to ``width_mm``: a channel that wide along the gap's center line
+    is cleared, trimming the shapes beside it. A channel that would split a shape is
+    skipped. Edits ``labels`` in place.
+    """
+    from skimage.morphology import skeletonize
+
+    bg = labels == TRANSPARENT
+    wide = cv2.morphologyEx(bg.astype(np.uint8), cv2.MORPH_OPEN, disk(width_mm)).astype(bool)
+    narrow = bg & ~wide
+    n, cc, st, _ = cv2.connectedComponentsWithStats(narrow.astype(np.uint8), connectivity=8)
+    opened = skipped = 0
+    pad = round(2 * width_mm * PX_PER_MM)
+    h, w = labels.shape
+    for i in range(1, n):
+        x, y, bw, bh, area = st[i]
+        if area < 0.1 * PX_PER_MM ** 2:
+            continue
+        box = cc[y:y + bh, x:x + bw] == i
+        ys, xs = np.nonzero(box)
+        (_, _), (rw, rh), _ = cv2.minAreaRect(np.stack([xs, ys], axis=1).astype(np.float32))
+        if max(rw, rh) + 1 < PX_PER_MM:
+            continue                                   # a corner tip
+        y0, y1, x0, x1 = max(0, y - pad), min(h, y + bh + pad), max(0, x - pad), min(w, x + bw + pad)
+        ring = cv2.dilate((cc[y0:y1, x0:x1] == i).astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+        if cv2.connectedComponents((ring & wide[y0:y1, x0:x1]).astype(np.uint8), connectivity=8)[0] - 1 == 1:
+            continue                                   # a wedge where two strokes meet: a corner tip
+        gap = cc[y0:y1, x0:x1] == i
+        # a hair wider than asked, so the pixel grid doesn't leave it just under the minimum
+        channel = cv2.dilate(skeletonize(gap).astype(np.uint8), disk(width_mm + 0.15)).astype(bool)
+        sub = labels[y0:y1, x0:x1]
+        cut = channel & (sub != TRANSPARENT)
+        if not cut.any():
+            continue
+        before = _components(sub)[0]
+        trial = sub.copy()
+        trial[cut] = TRANSPARENT
+        if _components(trial)[0] > before:
+            skipped += 1                               # the channel would cut a stroke in two
+            continue
+        sub[cut] = TRANSPARENT
+        opened += 1
+    if opened:
+        rep.notes.append(f"Opened {opened} narrow gap(s) to {width_mm:g} mm by trimming the shapes beside them.")
+    if skipped:
+        rep.warnings.append(f"{skipped} narrow gap(s) couldn't be opened without cutting a stroke in two.")
+
+
 def _components(labels: np.ndarray) -> tuple[int, np.ndarray]:
     """Separate shapes of the design (all colors together), 8-connected."""
     return cv2.connectedComponents((labels != TRANSPARENT).astype(np.uint8), connectivity=8)
@@ -576,6 +628,8 @@ def apply(labels: np.ndarray, fx: Fixes, crop: bool = True) -> tuple[np.ndarray,
     if fx.fill_corner_tips:
         # as wide as the narrowest gap the fabric keeps, so the gap check finds none left
         _fill_corner_tips(out, rep, max(TIP_FILL_MM, fx.min_gap_mm))
+    if fx.open_gaps:
+        _open_gaps(out, fx.min_gap_mm, rep)
 
     # specks the edits left behind (a corner cut off by a channel) aren't stitchable
     n, cc, st, _ = cv2.connectedComponentsWithStats((out != TRANSPARENT).astype(np.uint8), connectivity=8)

@@ -284,6 +284,10 @@
         <input type="checkbox" id="fillTips" style="margin-top:2px">
         <span><b>Fill corner tips</b>: closes the points of sharp inside corners, which narrow to nothing and
           can't be stitched. Never joins two shapes or shrinks a counter.</span></label>
+      <label class="hint" style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;color:var(--ink)">
+        <input type="checkbox" id="openGaps" style="margin-top:2px">
+        <span><b>Open narrow gaps</b>: widens gaps the fabric would close (0.6 mm, 0.8 mm on knits) between letters,
+          inside counters and between serifs, by trimming the letters beside them. Never cuts a stroke in two.</span></label>
       <ul class="checks" id="letterNotes"></ul>
     </details>
     <details class="stitch" id="stitchBox" hidden>
@@ -434,7 +438,7 @@ const state = {
   machine: { format: "pes", hoop: "4x4", hoopW: 100, hoopH: 100, speed: 400 },
   stitch: { overlap: 0.3, pull: 0.2, sliver: 0.35 },
   fabricType: "cotton",
-  letter: { bolder: 0, repairDots: true, fillTips: false },
+  letter: { bolder: 0, repairDots: true, fillTips: false, openGaps: false },
   photoMode: "auto", restoreDetail: false,
   editMode: null,        // null | "cut" | "rebuild" | "move": live preview clicks edit the shapes
   movePoint: null,       // [x, y] mm on the letter picked for Move
@@ -509,6 +513,7 @@ function planRequest() {
     speed_spm: state.machine.speed, overlap_mm: state.stitch.overlap, pull_comp_mm: state.stitch.pull,
     fabric_type: state.fabricType,
     bolder_mm: state.letter.bolder, repair_dots: state.letter.repairDots, fill_corner_tips: state.letter.fillTips,
+    open_gaps: state.letter.openGaps,
   };
 }
 
@@ -941,6 +946,7 @@ document.addEventListener("click", (e) => {
   else if (f.type === "outline") state.outlines.add(f.color_id);
   else if (f.type === "border") state.border = true;
   else if (f.type === "restore_detail") { state.restoreDetail = true; analyze(); return; }
+  else if (f.type === "open_gaps") { state.letter.openGaps = true; $("openGaps").checked = true; }
   refreshPlan().then(() => { if (state.result) generate(); });
 });
 
@@ -963,6 +969,7 @@ $("bolder").addEventListener("input", (e) => { state.letter.bolder = +e.target.v
 $("bolder").addEventListener("change", () => refreshPlan());
 $("repairDots").addEventListener("change", (e) => { state.letter.repairDots = e.target.checked; refreshPlan(); });
 $("fillTips").addEventListener("change", (e) => { state.letter.fillTips = e.target.checked; refreshPlan(); });
+$("openGaps").addEventListener("change", (e) => { state.letter.openGaps = e.target.checked; refreshPlan(); });
 
 // ------------------------------------------------------------------ edit letters
 /**
@@ -1106,7 +1113,7 @@ function showTab(tab) {
   $("stageBadge").hidden = !has;
   $("stageBadge").textContent = tab === "live" ? `live · on ${(state.plan?.summary.fabric_name || "fabric").toLowerCase()}`
       + (state.session && state.liveHoop ? ` · design ${liveSize().width_mm} × ${liveSize().height_mm} mm in ${state.liveHoop[0]} × ${state.liveHoop[1]} mm hoop (dashed)` : "")
-    : tab === "problems" ? "red = gaps < 0.6 mm · orange = < 1 mm wide"
+    : tab === "problems" ? `red = gaps < ${state.result?.gap_mm ?? 0.6} mm · orange = < 1 mm wide`
     : tab === "stitchout" ? `from the ${state.export?.report ? "." + state.export.report.format : "machine"} file · whole hoop · red = trim by hand` : "stitched shapes";
   $("stale").hidden = !(state.result && tab !== "live" && isStale());
 }

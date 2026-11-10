@@ -115,6 +115,7 @@ class PlanIn(BaseModel):
     bolder_pct: float = Field(0.0, ge=0, le=200)          # or this % of the median stroke width
     repair_dots: bool = True                              # redraw dashes / crowded dots above stems as round dots
     fill_corner_tips: bool = False                        # fill the points of sharp inside corners
+    open_gaps: bool = False                               # widen gaps under the fabric's minimum by trimming
 
 
 class EditIn(BaseModel):

@@ -729,6 +729,7 @@ def _fixes(req: dict) -> "lettering.Fixes":
                            bolder_pct=round(float(req.get("bolder_pct") or 0), 1),
                            repair_dots=bool(req.get("repair_dots", True)),
                            fill_corner_tips=bool(req.get("fill_corner_tips", False)),
+                           open_gaps=bool(req.get("open_gaps", False)),
                            min_gap_mm=fab.get("min_gap_mm", lettering.Fixes.min_gap_mm))
 
 
@@ -929,6 +930,7 @@ def generate(s: Session, req: dict) -> dict:
     plan["svg"] = svg
     plan["preview_png"] = preview
     plan["preview_marked_png"] = preview_marked
+    plan["gap_mm"] = fab.get("min_gap_mm", NARROW_GAP_MM)
     plan["layers"] = [{"label": l["label"], "hex": l["hex"], "shapes": len(l["shapes"]),
                        "contour": sum(p.get("fill_method") == "contour_fill" for _, p in l["shapes"]),
                        "lines": sum("stroke_method" in p for _, p in l["shapes"]),
@@ -1152,25 +1154,36 @@ def _fill(mask: np.ndarray, poly: Polygon) -> None:
     cv2.fillPoly(mask, pts, 1, lineType=cv2.LINE_8, shift=3)
 
 
-def _long_components(mask: np.ndarray, min_px: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Split components of at least ``min_px`` pixels into long ones and corner tips.
+def _long_components(mask: np.ndarray, min_px: float, wide: np.ndarray | None = None
+                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Split narrow areas of at least ``min_px`` pixels into real ones and corner tips.
 
-    A component counts as long when the long side of its minimum rotated rectangle is
-    at least ``TIP_MIN_LONG_MM``. The tip of a sharp inside corner narrows to nothing
-    by definition, so every one shows up as a narrow area; those are short triangles
-    and drop out here.
+    The point of a sharp inside corner narrows to nothing by definition, so every one
+    shows up as a narrow area. It's a tip when it is shorter than ``TIP_MIN_LONG_MM``
+    (long side of its minimum rotated rectangle), or, given ``wide`` (the area around it
+    that isn't narrow), when it is a wedge: it opens into ``wide`` at exactly one place
+    and is closed by the shapes everywhere else, as where two strokes meet at a shallow
+    angle. A passage open at both ends, or a narrow space closed all round, is real.
 
     Returns:
-        (connected-component label image, ids of the long components, ids of the tips).
+        (connected-component label image, ids of the real narrow areas, ids of the tips).
     """
     n, cc, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
     long_ids, tips = [], []
+    h, w = mask.shape
     for i in range(1, n):
         if stats[i, cv2.CC_STAT_AREA] < min_px:
             continue
-        ys, xs = np.nonzero(cc[stats[i, 1]:stats[i, 1] + stats[i, 3], stats[i, 0]:stats[i, 0] + stats[i, 2]] == i)
+        x, y, bw, bh = stats[i, :4]
+        ys, xs = np.nonzero(cc[y:y + bh, x:x + bw] == i)
         (_, _), (rw, rh), _ = cv2.minAreaRect(np.stack([xs, ys], axis=1).astype(np.float32))
-        (long_ids if max(rw, rh) + 1 >= TIP_MIN_LONG_MM * PX_PER_MM else tips).append(i)
+        tip = max(rw, rh) + 1 < TIP_MIN_LONG_MM * PX_PER_MM
+        if not tip and wide is not None:
+            y0, y1, x0, x1 = max(0, y - 2), min(h, y + bh + 2), max(0, x - 2), min(w, x + bw + 2)
+            ring = cv2.dilate((cc[y0:y1, x0:x1] == i).astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+            mouths = cv2.connectedComponents((ring & wide[y0:y1, x0:x1]).astype(np.uint8), connectivity=8)[0] - 1
+            tip = mouths == 1
+        (tips if tip else long_ids).append(i)
     return cc, np.array(long_ids, int), np.array(tips, int)
 
 
@@ -1204,8 +1217,9 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str, gap_mm: f
     * narrow gap: uncovered fabric a ``NARROW_GAP_MM`` disk can't fit in (components
       of at least 0.1 mm²), marked red, labeled as between shapes or inside one.
 
-    Narrow areas shorter than ``TIP_MIN_LONG_MM`` are corner tips: counted in an
-    info line, not marked.
+    Corner tips (narrow areas shorter than ``TIP_MIN_LONG_MM``, and fabric wedges that
+    open at one end only, see ``_long_components``) are counted in an info line, not
+    marked.
 
     Args:
         s: The session (for the canvas size).
@@ -1255,10 +1269,11 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str, gap_mm: f
                                             f"{NARROW_STITCH_MM:g} mm: fill stitches may not hold there (orange on preview)."})
 
     fabric_mask = (covered == 0).astype(np.uint8)
-    gaps = fabric_mask.astype(bool) & ~cv2.morphologyEx(fabric_mask, cv2.MORPH_OPEN, _disk(gap_mm)).astype(bool)
+    wide = cv2.morphologyEx(fabric_mask, cv2.MORPH_OPEN, _disk(gap_mm)).astype(bool)
+    gaps = fabric_mask.astype(bool) & ~wide
     if art is not None:
         gaps &= ~art
-    cc, long_ids, tip_ids = _long_components(gaps, 0.1 * px2)
+    cc, long_ids, tip_ids = _long_components(gaps, 0.1 * px2, wide)
     tips += len(tip_ids)
     gap_mask = np.isin(cc, long_ids)
     if len(long_ids):
@@ -1274,7 +1289,8 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str, gap_mm: f
                                       f"{inside} inside a shape" if inside else "") if t)
         warnings.append({"level": "warn", "code": "narrow_gap",
                          "message": f"{len(long_ids)} fabric gap(s) narrower than {gap_mm:g} mm ({where}) will "
-                                    "likely close up when stitched (red on preview)."})
+                                    "likely close up when stitched (red on preview).",
+                         "fixes": [{"type": "open_gaps", "label": f"Open narrow gaps to {gap_mm:g} mm"}]})
     if tips:
         warnings.append({"level": "info", "code": "corner_tips",
                          "message": f"{tips} corner tip(s) OK: the points of sharp inside corners always narrow to "
