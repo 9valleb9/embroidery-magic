@@ -501,7 +501,7 @@ SATIN_NARROW_MM = 0.7      # strokes this wide up to SATIN_MIN_MM are widened to
 SATIN_BRIDGE_MM = 3.0      # a column carries on through a thinner dip up to this long, at SATIN_MIN_MM
 SATIN_KEEP_BIT_MM2 = 0.3   # compact leftovers this big are kept even when thinner than SATIN_SLIVER_MM
 SATIN_KEEP_BIT_LONG_MM = 2.5   # ... if no longer than this (edge strips along a column are longer)
-GAP_KEEP_MM = 0.8          # satin edges stay out of fabric gaps narrower than this
+GAP_KEEP_MM = 1.0          # satin edges stay out of fabric gaps narrower than this
 SATIN_SLIVER_MM = 0.5      # leftovers narrower than this along a column are its edge, not a fill
 
 
