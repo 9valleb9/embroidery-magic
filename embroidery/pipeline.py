@@ -198,6 +198,20 @@ def get_session(sid: str) -> Session:
 
 # ---------------------------------------------------------------- analysis
 
+STITCH_FILE_ERROR = ("That's a stitch file this app made (the SVG you download after Generate), not artwork: "
+                     "its satins are drawn as thin edge lines, so tracing it falls apart. Drop the original "
+                     "logo or artwork file instead.")
+
+
+def is_stitch_svg(data: bytes) -> bool:
+    """True for an SVG this app (or Ink/Stitch) wrote: it carries ``urn:embroidery-magic``
+    metadata or Ink/Stitch stitch settings. Its satins are rail pairs and its lines are
+    strokes, so it can't be traced back into artwork."""
+    head = data[:200_000]
+    return is_svg(data, "") and (b"urn:embroidery-magic" in head or b"inkstitch:satin_column" in head
+                                 or b"inkstitch:fill_method" in head)
+
+
 def new_session(data: bytes, filename: str, width_mm: float, height_mm: float,
                 n_colors: int | None, remove_bg: str = "auto", sliver_mm: float = MORPH_DISK_MM,
                 photo_mode: str = "auto", restore_detail: bool = False) -> Session:

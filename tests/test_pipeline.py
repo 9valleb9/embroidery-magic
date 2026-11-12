@@ -689,3 +689,13 @@ def test_bolder_lettering_through_the_api(client):
     assert any("bolder" in n for n in p["lettering"]["notes"]) and p["lettering"]["label_png"]
     r = client.post("/api/generate", json=bold).json()
     assert r["width_mm"] <= 99.05 and r["height_mm"] <= 99.05              # analyze() asked for 99 x 99
+
+
+def test_stitch_svg_upload_is_refused():
+    """Dropping the app's own stitch SVG back in gets a clear error, not a broken trace."""
+    from embroidery.pipeline import is_stitch_svg
+    from embroidery.svg_out import write_svg
+    svg = write_svg(10, 10, [], {"fabric_hex": "#000000", "fabric_name": "Black", "bobbin_name": "White",
+                                 "bobbin_hex": "#ffffff", "threads": []}).encode()
+    assert is_stitch_svg(svg)
+    assert not is_stitch_svg(b'<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0 L1 1"/></svg>')

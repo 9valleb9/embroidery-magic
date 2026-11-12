@@ -208,6 +208,8 @@ async def analyze(file: UploadFile = File(...), width_mm: float = Form(97), heig
         raise HTTPException(400, "photo_mode must be auto, on or off.")
     if not (0.1 <= sliver_mm <= 2):
         raise HTTPException(400, "Sliver cleanup must be between 0.1 and 2 mm.")
+    if pipeline.is_stitch_svg(data):
+        raise HTTPException(400, pipeline.STITCH_FILE_ERROR)
     # Form fields arrive as strings; "auto" means let the palette step pick k.
     k = None if n_colors in ("", "auto") else int(n_colors)
     try:
