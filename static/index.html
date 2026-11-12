@@ -592,6 +592,7 @@ async function analyze() {
   fd.append("restore_detail", state.restoreDetail);
   $("generate").disabled = true;
   $("paletteEmpty").textContent = "Analyzing colors…";
+  $("paletteEmpty").style.color = "";
   $("paletteEmpty").hidden = false;
   try {
     const s = await api("/api/analyze", { method: "POST", body: fd });
@@ -617,7 +618,9 @@ async function analyze() {
     $("generate").disabled = false;
   } catch (e) {
     showError(e);
-    $("paletteEmpty").textContent = "Drop an image to detect its colors.";
+    // also say it in the Threads panel: #error sits below the fold of panel 1
+    $("paletteEmpty").textContent = e ? (e.message || String(e)) : "Drop an image to detect its colors.";
+    $("paletteEmpty").style.color = e ? "var(--err)" : "";
   }
 }
 
