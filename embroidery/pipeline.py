@@ -73,7 +73,7 @@ from .raster import PX_PER_MM, is_svg, rasterize
 from .route import route_layers
 from .svg_out import write_svg
 from .vectorize import (DOT_SPACING_MM, LINE_PARAMS, Satin, band, line_satin, mask_to_polygons, polygons, satin_params,
-                        split_dots, space_tips, split_satin, split_strokes, split_thin, stitch_params)
+                        split_dots, split_serifs, space_tips, split_satin, split_strokes, split_thin, stitch_params)
 
 OUTLINE_MM = 1.0
 BORDER_MM = 1.0
@@ -523,6 +523,9 @@ def _build_geometry(base_labels: np.ndarray, mapping: dict[int, int], thin_lines
             lines[i] = lines[i] + more
             mask, dots = split_dots(mask, satins[i])
             satins[i] += dots
+            # serifs, feet and junction corners the columns leave: short satin bars
+            mask, bars = split_serifs(mask, satins[i], labels == i)
+            satins[i] += bars
             # hairlines become 1 mm satin too, so they don't read as loose threads next to satin
             hair = [line_satin(ln) for ln in lines[i]]
             satins[i] += [h for h in hair if h is not None]

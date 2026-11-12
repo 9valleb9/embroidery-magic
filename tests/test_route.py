@@ -44,3 +44,23 @@ def test_touching_shapes_need_no_jump():
     route, jumps = route_layer(shapes, Point(20, 20))
     assert jumps == 0
     assert not any(p.get("trim_after") for _, p in route)
+
+
+def test_serif_feet_become_one_satin_bar():
+    """An i's stem column with a slab foot: the two foot pieces left either side of the
+    column become one satin bar across it instead of two grainy fills."""
+    import numpy as np
+    from embroidery.raster import PX_PER_MM
+    from embroidery.vectorize import split_serifs
+    k = PX_PER_MM
+    ink = np.zeros((14 * k, 10 * k), bool)
+    ink[1 * k:12 * k, 4 * k:int(5.6 * k)] = True          # 1.6 mm stem
+    ink[int(10.6 * k):12 * k, int(2.6 * k):7 * k] = True  # 1.4 mm tall foot, flaring both sides
+    stem = Satin([(4.0, 1.0), (4.0, 6.0), (4.0, 12.0)], [(5.6, 1.0), (5.6, 6.0), (5.6, 12.0)], 1.6)
+    rest = ink.copy()
+    rest[:, 4 * k:int(5.6 * k)] = False                    # what the column leaves: the two flares
+    rest, bars = split_serifs(rest, [stem], ink)
+    assert len(bars) == 1
+    assert rest.sum() == 0
+    x0, _, x1, _ = bars[0].poly.bounds
+    assert x1 - x0 > 3.5                                   # the bar runs across the whole foot

@@ -781,6 +781,118 @@ def split_dots(mask: np.ndarray, satins: list[Satin]) -> tuple[np.ndarray, list[
     return mask & ~np.isin(cc, drop), out
 
 
+SERIF_MAX_MM = 5.0         # a blob touching a column up to this long is a serif or junction piece
+SERIF_MIN_MM2 = 0.4        # smaller leftovers stay fills (they're seams, not shapes)
+SERIF_SPILL = 0.12         # a bar's outline may cover at most this share of fabric
+
+
+def _bar(poly: Polygon, width_hint: float | None = None) -> "Satin | None":
+    """One satin across a small convex-ish piece: the column runs along the piece's long
+    axis with rungs across it every half ``SATIN_STEP_MM`` (see :func:`split_dots`)."""
+    from shapely.geometry import LineString
+
+    rect = poly.minimum_rotated_rectangle
+    pts = np.array(rect.exterior.coords)[:4]
+    e1, e2 = pts[1] - pts[0], pts[2] - pts[1]
+    u = e1 if np.hypot(*e1) >= np.hypot(*e2) else e2
+    length, width = max(np.hypot(*e1), np.hypot(*e2)), min(np.hypot(*e1), np.hypot(*e2))
+    if width < 0.6 or length < 0.8:
+        return None
+    u = u / np.hypot(*u)
+    v = np.array([-u[1], u[0]])
+    c = np.array(rect.centroid.coords[0])
+    r1, r2 = [], []
+    for t in np.arange(-length / 2 + SATIN_STEP_MM / 4, length / 2, SATIN_STEP_MM / 2):
+        p = c + u * t
+        cut = poly.intersection(LineString([tuple(p - v * 10), tuple(p + v * 10)]))
+        if cut.is_empty or cut.geom_type != "LineString":
+            continue
+        a, b = np.array(cut.coords[0]), np.array(cut.coords[-1])
+        if np.dot(b - a, v) < 0:
+            a, b = b, a
+        r1.append((float(a[0]), float(a[1])))
+        r2.append((float(b[0]), float(b[1])))
+    if len(r1) < 3:
+        return None
+    try:
+        return Satin(r1, r2, width_hint or width)
+    except ValueError:
+        return None
+
+
+def split_serifs(mask: np.ndarray, satins: list[Satin], ink: np.ndarray) -> tuple[np.ndarray, list[Satin]]:
+    """Turn the small pieces the columns leave against them (slab serifs, feet, junction
+    corners) into short satin bars.
+
+    Tatami on a 1 to 3 mm piece reads as grainy and, on knits, pulls away from the smooth
+    satin beside it. A piece qualifies when it touches a column, is at most
+    ``SERIF_MAX_MM`` long and at least ``SERIF_MIN_MM2`` in area. Two pieces on either
+    side of the same column end (an i's foot) become one bar across it, sewn over the
+    column end, when their convex hull is mostly ink (at most ``SERIF_SPILL`` fabric).
+    A single piece uses its own convex hull on the same condition, else its outline.
+
+    Args:
+        mask: What's left for fills after the columns, dots and strokes.
+        satins: The columns (pieces must touch one).
+        ink: The whole color mask, to measure spill.
+
+    Returns:
+        ``(fill_mask, bars)``.
+    """
+    from shapely.ops import unary_union
+
+    n, cc, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    pieces = {}
+    for i in range(1, n):
+        x, y, w, h = stats[i, :4]
+        if max(w, h) > SERIF_MAX_MM * PX_PER_MM or stats[i, 4] < SERIF_MIN_MM2 * PX_PER_MM ** 2:
+            continue
+        polys = mask_to_polygons(cc == i)
+        if not polys:
+            continue
+        poly = max(polys, key=lambda q: q.area)
+        touch = [k for k, sat in enumerate(satins) if poly.buffer(0.1).intersects(sat.poly)]
+        if touch:
+            pieces[i] = (poly, set(touch))
+    ink_poly = unary_union(mask_to_polygons(ink)).buffer(0.05)
+
+    def spill(hull):
+        return hull.difference(ink_poly).area / max(hull.area, 1e-9)
+
+    out, done = [], set()
+    ids = sorted(pieces, key=lambda i: -pieces[i][0].area)
+    for i in ids:
+        if i in done:
+            continue
+        pi, ti = pieces[i]
+        partner = None
+        for j in ids:
+            if j == i or j in done or not (ti & pieces[j][1]):
+                continue
+            pj = pieces[j][0]
+            hull = unary_union([pi, pj]).convex_hull
+            r = hull.minimum_rotated_rectangle
+            e = np.array(r.exterior.coords)
+            if max(np.hypot(*(e[1] - e[0])), np.hypot(*(e[2] - e[1]))) > SERIF_MAX_MM * 1.6:
+                continue
+            if spill(hull) <= SERIF_SPILL and (partner is None or hull.area < partner[1].area):
+                partner = (j, hull)
+        if partner is not None:
+            bar = _bar(partner[1])
+            if bar is not None:
+                out.append(bar)
+                done |= {i, partner[0]}
+                continue
+        hull = pi.convex_hull
+        bar = _bar(hull if spill(hull) <= SERIF_SPILL else pi)
+        if bar is not None:
+            out.append(bar)
+            done.add(i)
+    if not out:
+        return mask, []
+    return mask & ~np.isin(cc, list(done)), out
+
+
 SATIN_TIP_GAP_MM = 1.8     # satin tips closer than this to a separate shape are shortened...
 SATIN_TIP_PULLBACK_MM = 0.3   # ...by at most this: about how far a satin end pushes out when sewn
 
