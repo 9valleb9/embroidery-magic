@@ -539,6 +539,21 @@ class Satin:
         return Satin([(x + dx, y + dy) for x, y in self.rail1], [(x + dx, y + dy) for x, y in self.rail2],
                      self.width_mm, self.dot)
 
+    def reversed(self) -> "Satin":
+        """The same column sewn the other way (Ink/Stitch starts a satin at the rails'
+        first nodes and ends at their last)."""
+        return Satin(self.rail1[::-1], self.rail2[::-1], self.width_mm, self.dot)
+
+    @property
+    def start(self) -> tuple[float, float]:
+        """Where the column starts: midway between the rails' first nodes."""
+        return ((self.rail1[0][0] + self.rail2[0][0]) / 2, (self.rail1[0][1] + self.rail2[0][1]) / 2)
+
+    @property
+    def end(self) -> tuple[float, float]:
+        """Where the column ends: midway between the rails' last nodes."""
+        return ((self.rail1[-1][0] + self.rail2[-1][0]) / 2, (self.rail1[-1][1] + self.rail2[-1][1]) / 2)
+
 
 def satin_params(width_mm: float, pull_comp_mm: float = 0.0, row_spacing_mm: float | None = None,
                  underlay: bool = False, light_on_dark: bool = False) -> dict[str, str]:

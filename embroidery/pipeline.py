@@ -70,6 +70,7 @@ from .palette import MORPH_DISK_MM, TRANSPARENT, analyze, edge_connected, frame_
 from . import machines as M
 from .export import EST_STITCHES_PER_MM2, STITCH_WARN
 from .raster import PX_PER_MM, is_svg, rasterize
+from .route import route_layers
 from .svg_out import write_svg
 from .vectorize import (DOT_SPACING_MM, LINE_PARAMS, Satin, band, line_satin, mask_to_polygons, polygons, satin_params,
                         split_dots, space_tips, split_satin, split_strokes, split_thin, stitch_params)
@@ -894,7 +895,7 @@ def generate(s: Session, req: dict) -> dict:
     art = np.isin(geom.labels, stitched)               # colors left as fabric don't count
     # a view of the session at the final size, for the checks below
     s = replace(s, width_mm=W, height_mm=H, labels=np.broadcast_to(np.uint8(0), (round(H * PX_PER_MM), round(W * PX_PER_MM))))
-    _order_shapes(layers, Point(s.width_mm / 2, s.height_mm / 2))
+    route_layers(layers, Point(s.width_mm / 2, s.height_mm / 2))
     hoop_w, hoop_h = M.oriented(s.width_mm, s.height_mm, *_hoop(req))
     speed = req.get("speed_spm") or M.DEFAULT_SPEED_SPM
     # Tighter rows than standard mean proportionally more stitches per mm².
@@ -931,9 +932,10 @@ def generate(s: Session, req: dict) -> dict:
     plan["preview_png"] = preview
     plan["preview_marked_png"] = preview_marked
     plan["gap_mm"] = fab.get("min_gap_mm", NARROW_GAP_MM)
-    plan["layers"] = [{"label": l["label"], "hex": l["hex"], "shapes": len(l["shapes"]),
+    plan["layers"] = [{"label": l["label"], "hex": l["hex"], "shapes": sum("_travel" not in p for _, p in l["shapes"]),
                        "contour": sum(p.get("fill_method") == "contour_fill" for _, p in l["shapes"]),
-                       "lines": sum("stroke_method" in p for _, p in l["shapes"]),
+                       "lines": sum("stroke_method" in p and "_travel" not in p for _, p in l["shapes"]),
+                       "travel": sum("_travel" in p for _, p in l["shapes"]),
                        "satins": sum("_satin" in p for _, p in l["shapes"])}
                       for l in layers]
     plan["width_mm"], plan["height_mm"] = s.width_mm, s.height_mm
@@ -975,79 +977,6 @@ def _hoop(req: dict) -> tuple[float, float]:
     return float(req.get("hoop_w") or h["w"]), float(req.get("hoop_h") or h["h"])
 
 
-def _order_shapes(layers: list[dict], start: Point) -> None:
-    """Within each color, visit fills and outline lines in nearest-neighbor order,
-    starting next to where the previous color finished, so stitching flows from a
-    fill into the outline that touches it. Most home machines don't trim jumps, so
-    every remaining jump is a thread to cut by hand. Pure-fill colors get a 2-opt pass.
-
-    Distances are shapely ``distance`` (closest points), measured from the previous
-    shape itself for fills and from the end point for lines. Lines may be reversed so
-    they start at the nearer end. The 2-opt pass is limited to 40 shapes per layer.
-
-    Args:
-        layers: Layers in stitch order; each layer's ``shapes`` list is replaced in place.
-        start: Where the machine starts (hoop center in design coordinates).
-    """
-    cursor = start                        # the machine starts at hoop center
-    for layer in layers:
-        left = list(layer["shapes"])
-        route = []
-        here = cursor                     # geometry we're leaving from
-        while left:
-            nxt = min(left, key=lambda it: it[0].distance(here))
-            left.remove(nxt)
-            g, prm = nxt
-            if g.geom_type == "LineString":   # run lines from whichever end is closer
-                if Point(g.coords[-1]).distance(here) < Point(g.coords[0]).distance(here):
-                    g = LineString(g.coords[::-1])
-                here = Point(g.coords[-1])
-            else:
-                here = g
-            route.append((g, prm))
-        if 1 < len(route) <= 40 and all(g.geom_type != "LineString" for g, _ in route):
-            route = _two_opt(route, cursor)
-        layer["shapes"] = route
-        if route:
-            last = route[-1][0]
-            cursor = Point(last.coords[-1]) if last.geom_type == "LineString" else last.representative_point()
-
-
-def _two_opt(route: list, start) -> list:
-    """Improve a fill visiting order with 2-opt (reverse sub-runs while it gets shorter).
-
-    The cost is an open path: distance from ``start`` to the first shape plus the gaps
-    between consecutive shapes. Distances are precomputed, so this is O(n²) memory and
-    roughly O(n³) per improving pass; callers keep n small.
-
-    Args:
-        route: ``(geometry, params)`` pairs.
-        start: Starting point (shapely geometry).
-
-    Returns:
-        The same pairs in the improved order.
-    """
-    n = len(route)
-    polys = [p for p, _ in route]
-    d0 = [p.distance(start) for p in polys]
-    d = [[a.distance(b) if i != j else 0.0 for j, b in enumerate(polys)] for i, a in enumerate(polys)]
-
-    def cost(order):
-        return d0[order[0]] + sum(d[a][b] for a, b in zip(order, order[1:]))
-
-    best = list(range(n))
-    best_cost, improved = cost(best), True
-    while improved:
-        improved = False
-        for i in range(n - 1):
-            for j in range(i + 2, n + 1):
-                cand = best[:i] + best[i:j][::-1] + best[j:]
-                c = cost(cand)
-                if c < best_cost - 1e-6:
-                    best, best_cost, improved = cand, c, True
-    return [route[i] for i in best]
-
-
 def _fabric_advice(s: Session, fab: dict, pull: float, layers: list[dict], machine: dict,
                    geo_warnings: list[dict], hoop: tuple[float, float]) -> dict:
     """The "Before you stitch" box: what goes under and on top of the fabric, the stitch
@@ -1068,7 +997,7 @@ def _fabric_advice(s: Session, fab: dict, pull: float, layers: list[dict], machi
         density label, underlay and notes.
     """
     notes = list(fab["extras"])
-    n_lines = sum("stroke_method" in p for l in layers for _, p in l["shapes"])
+    n_lines = sum("stroke_method" in p and "_travel" not in p for l in layers for _, p in l["shapes"])
     narrow = any(w["code"] == "narrow_stitch" for w in geo_warnings)
     if n_lines or narrow:
         mw, mh = M.max_design(*hoop)
@@ -1104,7 +1033,8 @@ def _machine_summary(layers: list[dict], speed: float, hoop: tuple[float, float]
     Consecutive layers with the same thread hex count as one block. A thread that comes
     back later gets a ``color_revisit`` warning. Stitches are estimated from fill area
     (``EST_STITCHES_PER_MM2`` x density) plus running-stitch length (triple run at 2 mm
-    per stitch), rounded to hundreds. Jumps are counted as shapes per layer minus one.
+    per stitch) and hidden travel runs, rounded to hundreds. Jumps are the ones the router
+    (``route.route_layers``) couldn't avoid.
 
     Args:
         layers: Final, ordered layers.
@@ -1129,9 +1059,10 @@ def _machine_summary(layers: list[dict], speed: float, hoop: tuple[float, float]
                                         "that's an extra manual thread change. Reorder or change the outline color to avoid it."})
         seen.add(hx)
     area = sum(g.area for l in layers for g, _ in l["shapes"])
-    run = sum(g.length for l in layers for g, _ in l["shapes"] if g.geom_type == "LineString")
-    est = int(round(area * EST_STITCHES_PER_MM2 * density + run * 3 / 2.0, -2))   # triple run, 2 mm stitches
-    jumps = sum(max(0, len(l["shapes"]) - 1) for l in layers)
+    run = sum(g.length for l in layers for g, p in l["shapes"] if g.geom_type == "LineString" and "_travel" not in p)
+    travel = sum(g.length for l in layers for g, p in l["shapes"] if "_travel" in p)
+    est = int(round(area * EST_STITCHES_PER_MM2 * density + run * 3 / 2.0 + travel / 1.5, -2))   # triple run, 2 mm stitches
+    jumps = sum(l.get("jumps", max(0, len(l["shapes"]) - 1)) for l in layers)
     if est > STITCH_WARN:
         warnings.append({"level": "warn", "code": "stitch_count",
                          "message": f"About {est:,} stitches, over {STITCH_WARN:,}, roughly "
@@ -1250,8 +1181,8 @@ def _render_and_check(s: Session, layers: list[dict], fabric_hex: str, gap_mm: f
             if g.geom_type != "LineString":
                 _fill(m, g)
         stroke = np.zeros((h, w), np.uint8)
-        for g, _ in layer["shapes"]:
-            if g.geom_type == "LineString":
+        for g, prm in layer["shapes"]:
+            if g.geom_type == "LineString" and "_travel" not in prm:   # travel runs sit under satin
                 pts = np.round((np.asarray(g.coords) * PX_PER_MM - 0.5) * 8).astype(np.int32)
                 cv2.polylines(stroke, [pts], False, 1, line_px, cv2.LINE_8, shift=3)
         bgr = C.hex_to_rgb(layer["hex"])[::-1]

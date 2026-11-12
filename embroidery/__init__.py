@@ -13,8 +13,10 @@ through these modules, in this order:
    (tatami or contour fill, angle, density, underlay, pull compensation), thin-line
    outlines, outline bands and satin columns.
 5. ``pipeline``: analysis sessions (geometry that is traced once), fabric-aware color
-   decisions (knockouts, merges, warnings, stitch order), shape ordering, previews and
-   gap checks, and generation of the final SVG plus a machine summary.
+   decisions (knockouts, merges, warnings, stitch order), previews and gap checks, and
+   generation of the final SVG plus a machine summary.
+   ``route`` orders each thread's shapes: one piece per touching group with hidden
+   travel runs between its shapes, and short trim-marked jumps between pieces.
 6. ``svg_out``: writes the Ink/Stitch-ready SVG (mm units, one layer per thread, the
    ``urn:embroidery-magic`` metadata block and the ``inkstitch_svg_version`` stamp).
 7. ``export``: runs the Ink/Stitch CLI in a background job to write the machine file
