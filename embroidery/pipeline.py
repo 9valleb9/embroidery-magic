@@ -412,6 +412,7 @@ def session_payload(s: Session) -> dict:
     }
 
 
+SEE_THROUGH_SHARE = 0.3     # background-colored areas under this share of the design are see-through
 SATIN_RECOMMEND_SHARE = 0.4   # recommend satin when this much of the design is stroke-like
 
 
@@ -627,12 +628,25 @@ def build_plan(s: Session, req: dict) -> dict:
     outlines = set(req.get("outlines") or [])
     warnings: list[dict] = []
 
+    # Small areas in the removed edge background's color are either white details in a
+    # logo or the page showing through letters (the inside of an e). They count as
+    # see-through only when they'd be all that's left to stitch: dark art on dark fabric,
+    # where every artwork color is knocked out (see below).
+    bg_hex = s.background["hex"] if s.background and s.background.get("removed") else None
+    total = sum(geom.area_mm2[cid] for cid in eff_ids) or 1.0
+    see_through = {cid for cid in eff_ids if bg_hex
+                   and C.delta_e(by_id[cid]["hex"].lower(), bg_hex) < C.KNOCKOUT_DE
+                   and geom.area_mm2[cid] < SEE_THROUGH_SHARE * total}
+    if not see_through or any(C.delta_e(by_id[cid]["hex"].lower(), fabric) >= C.KNOCKOUT_DE
+                              for cid in eff_ids if cid not in see_through):
+        see_through = set()
+
     decided = {}
     for cid in eff_ids:
         c = by_id[cid]
         hx = c["hex"].lower()
         de = C.delta_e(hx, fabric)
-        auto = de < C.KNOCKOUT_DE
+        auto = de < C.KNOCKOUT_DE or cid in see_through
         override = c.get("fabric")
         is_fabric = auto if override is None else bool(override)
         name = C.color_name(hx)
@@ -654,6 +668,17 @@ def build_plan(s: Session, req: dict) -> dict:
                              "message": f"{name} was left as fabric on {restored} fabric. It doesn't match "
                                         f"{C.fabric_label(fabric)} fabric, so it is now stitched as "
                                         f"“{decided[cid]['layer_name']}”."})
+
+    # Knocking out every color would stitch nothing (dark art on dark fabric): keep the
+    # largest artwork color stitched; the low-contrast warning below offers a thread swap.
+    if decided and all(d["fabric"] for d in decided.values()) and all(d["override"] is None for d in decided.values()):
+        keep = max((cid for cid in eff_ids if cid not in see_through) or eff_ids, key=lambda i: decided[i]["area_mm2"])
+        d = decided[keep]
+        d["fabric"] = d["auto_fabric"] = False
+        d["light_on_dark"] = C.is_light_on_dark(d["hex"], fabric)
+        warnings.append({"level": "info", "code": "all_fabric", "color_id": keep,
+                         "message": f"All of the artwork matches the {C.fabric_label(fabric)} fabric, so "
+                                    f"{d['name']} stays stitched. Pick a thread color that shows on it."})
 
     # Names must be unique per layer: "Green", "Green 2".
     seen: dict[str, int] = {}

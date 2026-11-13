@@ -699,3 +699,27 @@ def test_stitch_svg_upload_is_refused():
                                  "bobbin_hex": "#ffffff", "threads": []}).encode()
     assert is_stitch_svg(svg)
     assert not is_stitch_svg(b'<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0 L1 1"/></svg>')
+
+
+def test_dark_art_on_dark_fabric_still_stitches_and_counters_stay_fabric():
+    """Black lettering on a white page, stitched on black fabric: the letter insides (the
+    white background showing through) default to fabric, and the black art is kept
+    stitched (not knocked out) with a low-contrast warning offering a thread swap."""
+    import cv2
+    import numpy as np
+    from embroidery import pipeline as P
+    img = np.full((300, 600, 3), 255, np.uint8)
+    cv2.circle(img, (150, 150), 90, (0, 0, 0), 60)          # an "o": black ring, white inside
+    cv2.rectangle(img, (330, 60), (380, 240), (0, 0, 0), -1)  # an "l"
+    ok, png = cv2.imencode(".png", img)
+    s = P.new_session(png.tobytes(), "o.png", 60, 60, None, photo_mode="off")
+    cols = P.session_payload(s)["palette"]
+    req = {"fabric_hex": "#000000", "colors": [{"id": c["id"], "hex": c["hex"], "fabric": None,
+                                                 "merged_into": None} for c in cols]}
+    plan = P.build_plan(s, req)
+    plan.pop("_geom", None)
+    by_hex = {c["hex"][:3]: c for c in plan["colors"]}
+    assert by_hex["#00"]["fabric"] is False                  # black art stitches
+    assert by_hex["#ff"]["fabric"] is True                   # white inside the o is fabric
+    codes = {w["code"] for w in plan["warnings"]}
+    assert {"all_fabric", "low_contrast"} <= codes
